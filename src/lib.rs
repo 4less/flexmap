@@ -9,7 +9,9 @@ const GLOBAL_VERSION: u32 = 1;
 pub mod keys;
 pub mod values;
 pub mod flexmap;
+pub mod build;
 pub mod example;
+
 
 #[macro_use]
 extern crate savefile_derive;

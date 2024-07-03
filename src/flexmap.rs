@@ -2,12 +2,13 @@ use crate::keys::FMKeys;
 use crate::values::{FMValues, VRange};
 
 pub type FlexmapStd = Flexmap<15, 16, 16, 2>;
-pub type FMKeysStd = FMKeys<15, 16, 16>;
+pub type FMKeysStd = FMKeys<15, 16>;
 
 pub type FlexmapSmall = Flexmap<3, 10, 16, 2>;
-pub type FMKeysSmall = FMKeys<3, 10, 16>;
+pub type FMKeysSmall = FMKeys<3, 16>;
 
 use savefile::prelude::*;
+// use savefile_derive::Savefile;
 
 /// Explanation Flexmap
 ///
@@ -42,21 +43,21 @@ use savefile::prelude::*;
 
 #[derive(Clone, Savefile)]
 pub struct Flexmap<
-    const K: usize,
+    const C: usize,
     const F: usize,
     const CELLS_PER_BODY: u64,
     const HEADER_THRESHOLD: usize,
 > {
-    pub keys: FMKeys<K, F, CELLS_PER_BODY>,
+    pub keys: FMKeys<C, CELLS_PER_BODY>,
     pub values: FMValues<F, HEADER_THRESHOLD>,
 }
 
-impl<const K: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
-    Flexmap<K, F, CELLS_PER_BODY, HEADER_THRESHOLD>
+impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
+    Flexmap<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
 {
     pub fn new(
-        keys: FMKeys<K, F, CELLS_PER_BODY>,
-    ) -> Flexmap<K, F, CELLS_PER_BODY, HEADER_THRESHOLD> {
+        keys: FMKeys<C, CELLS_PER_BODY>,
+    ) -> Flexmap<C, F, CELLS_PER_BODY, HEADER_THRESHOLD> {
         let size = keys.get_values_size();
         Flexmap {
             keys: keys,

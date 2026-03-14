@@ -12,8 +12,13 @@ channel = "nightly"
 colored = "2.1.0"
 kmerrs = { path = "/usr/users/QIB_fr017/fritsche/ProjectsPrivate/kmerrs/" }
 bioreader = { path = "/usr/users/QIB_fr017/fritsche/ProjectsPrivate/bioreader/" }
-savefile = { version="0.16.5", feature="derive" }
-savefile-derive = "0.16.5"
+savefile = { version="0.17", feature="derive" }
+savefile-derive = "0.17"
+ser_raw = "0.1.0"
+serde = { version = "1.0.207", features = ["derive"] }
+serde_derive = "1.0.207"
+bincode = { version = "2.0.0-rc.3" }
+fxhash = "0.2.1"
 
 [profile.release]
 opt-level = 3               # Use best optimizations

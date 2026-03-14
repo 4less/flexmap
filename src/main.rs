@@ -35,7 +35,7 @@ fn test_simple() {
     keys.set_control_header_value_from_kmer(0, 42);
     println!("{}", keys.get_control_head_value_from_kmer(0));
 
-    keys.build::<2>();
+    keys.build::<2>(100);
 
 }
 
@@ -56,7 +56,7 @@ fn main() {
     test_simple();
 
     
-    let flexmap = build_flexmap();
+    let mut flexmap = build_flexmap();
     test_flexmap(&flexmap);
 
     
@@ -67,6 +67,9 @@ fn main() {
         Ok(file) => file,
     };
     let _ = save(&mut file, GLOBAL_VERSION, &flexmap);
+
+    let keys_path = "/usr/users/QIB_fr017/fritsche/ProjectsPrivate/flexalign/results/keys.bin".to_string();
+    // unsafe { flexmap.keys.save_keys(&keys_path) };
 
     let mut file = match File::open(&path) {
         Err(why) => panic!("couldn't open {}: {}", path.display(), why),

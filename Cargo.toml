@@ -10,8 +10,8 @@ channel = "nightly"
 
 [dependencies]
 colored = "2.1.0"
-kmerrs = { path = "/usr/users/QIB_fr017/fritsche/ProjectsPrivate/kmerrs/" }
-bioreader = { path = "/usr/users/QIB_fr017/fritsche/ProjectsPrivate/bioreader/" }
+kmerrs = { git = "https://github.com/4less/kmerr.git" }
+bioreader = { git = "https://github.com/4less/bioreader.git" }
 savefile = { version="0.17", feature="derive" }
 savefile-derive = "0.17"
 ser_raw = "0.1.0"

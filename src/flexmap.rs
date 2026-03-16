@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::mem::size_of;
 use std::os::unix::fs::MetadataExt;
 use std::process::exit;
 use std::ptr;
@@ -22,6 +23,19 @@ use bioreader::utils::{time, time_noerr};
 use savefile::prelude::*;
 use ser_raw::{Serialize, Serializer};
 // use savefile_derive::Savefile;
+
+const FLEXMAP_BIN_MAGIC: u64 = 0x464c45584d415031; // "FLEXMAP1"
+const FLEXMAP_BIN_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct FlexmapBinHeader {
+    magic: u64,
+    version: u32,
+    _reserved: u32,
+    keys_len: u64,
+    values_len: u64,
+}
 
 
 pub trait FlexOptions {
@@ -90,6 +104,59 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
         Flexmap {
             keys: keys,
             values: FMValues::new(size),
+        }
+    }
+
+    pub fn save(&self, filename: &String) {
+        let mut file = File::create(filename).expect("Failed to create flexmap file");
+
+        let header = FlexmapBinHeader {
+            magic: FLEXMAP_BIN_MAGIC,
+            version: FLEXMAP_BIN_VERSION,
+            _reserved: 0,
+            keys_len: self.keys.data.len() as u64,
+            values_len: self.values.data.len() as u64,
+        };
+
+        file.write_all(bytemuck::bytes_of(&header))
+            .expect("Failed to write flexmap header");
+        file.write_all(bytemuck::cast_slice(&self.keys.data))
+            .expect("Failed to write flexmap keys");
+        file.write_all(bytemuck::cast_slice(&self.values.data))
+            .expect("Failed to write flexmap values");
+    }
+
+    pub fn load(filename: &String) -> Flexmap<C, F, CELLS_PER_BODY, HEADER_THRESHOLD> {
+        let mut file = File::open(filename).expect("Failed to open flexmap file");
+
+        let mut header_bytes = [0u8; size_of::<FlexmapBinHeader>()];
+        file.read_exact(&mut header_bytes)
+            .expect("Failed to read flexmap header");
+        let header = bytemuck::pod_read_unaligned::<FlexmapBinHeader>(&header_bytes);
+
+        if header.magic != FLEXMAP_BIN_MAGIC {
+            panic!("Invalid flexmap binary: magic mismatch");
+        }
+        if header.version != FLEXMAP_BIN_VERSION {
+            panic!("Invalid flexmap binary: unsupported version");
+        }
+
+        let mut keys_data = vec![crate::keys::KCell(0); header.keys_len as usize];
+        let mut values_data = vec![crate::values::VCell(0); header.values_len as usize];
+
+        file.read_exact(bytemuck::cast_slice_mut(&mut keys_data))
+            .expect("Failed to read flexmap keys");
+        file.read_exact(bytemuck::cast_slice_mut(&mut values_data))
+            .expect("Failed to read flexmap values");
+
+        let mut trailing = [0u8; 1];
+        if file.read(&mut trailing).expect("Failed to read trailing byte") != 0 {
+            panic!("Invalid flexmap binary: trailing bytes detected");
+        }
+
+        Flexmap {
+            keys: FMKeys { data: keys_data },
+            values: FMValues { data: values_data },
         }
     }
 }

@@ -2,7 +2,6 @@
 use std::{array, borrow::Borrow, cell::Cell, collections::HashMap, default, error::Error, fs::{self, File}, hash::{BuildHasher, Hash}, intrinsics::size_of, io::{Read, Write}, mem::{self, transmute}, num::Wrapping, process::exit};
 use bincode::{Decode, Encode};
 use fxhash::FxBuildHasher;
-use savefile::{Deserialize, Serialize, WithSchema};
 use bioreader::utils::time_noerr;
 use kmerrs::consecutive::kmer::Kmer;
 
@@ -37,7 +36,7 @@ use kmerrs::consecutive::kmer::Kmer;
 //      ├──────────┤       │             │
 //      │          │
 
-#[derive(Clone, Copy, Savefile, Encode, Decode, ser_raw::Serialize, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Encode, Decode, ser_raw::Serialize, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct KCell(pub u16);
 
@@ -61,7 +60,7 @@ pub const fn table_size<const C: usize, const CELLS_PER_BODY: u64>() -> usize {
 
 
 
-#[derive(Clone, Savefile, Encode, Decode, ser_raw::Serialize)]
+#[derive(Clone, Encode, Decode, ser_raw::Serialize)]
 #[repr(C)]
 pub struct FMKeys<const C: usize, const CELLS_PER_BODY: u64> { //where [(); table_size::<C,CELLS_PER_BODY>()]: 
     pub data: Vec<KCell>,
@@ -298,7 +297,7 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
 }  
 
 
-#[derive(Clone, Encode, Decode, Savefile)]
+#[derive(Clone, Encode, Decode)]
 #[repr(C)]
 pub struct KHashEntry {
     pub key: u32,
@@ -312,7 +311,7 @@ impl Default for KHashEntry {
     }
 }
 
-#[derive(Clone, Savefile, Encode, Decode)]
+#[derive(Clone, Encode, Decode)]
 #[repr(C)]
 pub struct FMKeysHash {
     pub data: Vec<KHashEntry>,
@@ -580,4 +579,3 @@ mod tests {
         });
     }
 }
-

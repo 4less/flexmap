@@ -4,7 +4,6 @@ use std::{cmp::min, collections::HashMap, fs::File, mem::transmute, path::{Path,
 use flexmap::{example::{build_flexmap, test_flexmap}, flexmap::Flexmap, keys::FMKeys};
 use kmerrs::consecutive::kmer::{Kmer, KmerIter};
 use bioreader::{fasta_byte_reader, fastq_byte_reader, fasta_reader, fastq_reader};
-use savefile::{load, save};
 
 
 fn test_simple() {
@@ -60,21 +59,12 @@ fn main() {
     test_flexmap(&flexmap);
 
     
-    const GLOBAL_VERSION: u32 = 1;
-    let path = PathBuf::from("result/flexmap.save");
-    let mut file = match File::create(&path) {
-        Err(why) => panic!("couldn't open {}: {}", path.display(), why),
-        Ok(file) => file,
-    };
-    let _ = save(&mut file, GLOBAL_VERSION, &flexmap);
+    let path = "result/flexmap.bin".to_string();
+    flexmap.save(&path);
 
     let keys_path = "/usr/users/QIB_fr017/fritsche/ProjectsPrivate/flexalign/results/keys.bin".to_string();
     // unsafe { flexmap.keys.save_keys(&keys_path) };
 
-    let mut file = match File::open(&path) {
-        Err(why) => panic!("couldn't open {}: {}", path.display(), why),
-        Ok(file) => file,
-    };
-    let flexmap: Flexmap<3, 8, 8, 2> = load(&mut file, GLOBAL_VERSION).expect("Loading did not work");
+    let flexmap: Flexmap<3, 8, 8, 2> = Flexmap::load(&path);
 
 }

@@ -80,7 +80,7 @@ impl<const VAL_BITS: usize, const POS_BITS: usize> VData<VAL_BITS, POS_BITS> {
     }
 }
 
-#[derive(Clone, Copy, Savefile, ser_raw::Serialize, Encode, Decode, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, ser_raw::Serialize, Encode, Decode, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct VCell(pub u64);
 
@@ -339,7 +339,7 @@ impl<'a> VRangeMut<'a> {
     }
 }
 
-#[derive(Clone, Savefile, ser_raw::Serialize, Encode, Decode)]
+#[derive(Clone, ser_raw::Serialize, Encode, Decode)]
 #[repr(C)]
 pub struct FMValues<const F: usize, const HEADER_THRESHOLD: usize> {
     pub data: Vec<VCell>,

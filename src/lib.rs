@@ -19,8 +19,6 @@ pub mod build;
 pub mod example;
 
 
-#[macro_use]
-extern crate savefile_derive;
 extern crate test;
 
 pub fn add(left: usize, right: usize) -> usize {

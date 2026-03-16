@@ -20,9 +20,7 @@ pub type KeysHashSmall = HashMap<u32, (u32, u32)>;
 
 use bincode::{Decode, Encode};
 use bioreader::utils::{time, time_noerr};
-use savefile::prelude::*;
 use ser_raw::{Serialize, Serializer};
-// use savefile_derive::Savefile;
 
 const FLEXMAP_BIN_MAGIC: u64 = 0x464c45584d415031; // "FLEXMAP1"
 const FLEXMAP_BIN_VERSION: u32 = 1;
@@ -82,7 +80,7 @@ pub trait DBBuilder {
 // / The interface for this is provided with the crate kmerrs
 
 
-#[derive(Clone, Savefile, Encode, Decode, ser_raw::Serialize)]
+#[derive(Clone, Encode, Decode, ser_raw::Serialize)]
 #[repr(C)]
 pub struct Flexmap<
     const C: usize,
@@ -171,7 +169,7 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
 }
 
 
-#[derive(Clone, Savefile, Encode, Decode)]
+#[derive(Clone, Encode, Decode)]
 #[repr(C)]
 pub struct FlexmapHash<
     const C: usize,

@@ -2,7 +2,6 @@ use std::{cmp::min, collections::HashMap, fs::File, io::BufRead, path::Path, syn
 
 use kmerrs::{consecutive::kmer::KmerIter, minimizer::context_free::Minimizer, syncmer::closed_syncmer::ClosedSyncmer};
 use bioreader::{fasta_byte_reader::{self, FastaByteReader}, fasta_reader::{self, FastaReader}, fastq_byte_reader, fastq_reader, sequence::fasta_record::OwnedFastaRecord};
-use savefile::save;
 
 use crate::{flexmap::{Flexmap, FlexmapHash, KeysHashSmall}, keys::{self, FMKeys, FMKeysHash}, values::VData, VD};
 

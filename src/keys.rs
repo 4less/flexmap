@@ -37,7 +37,7 @@ use kmerrs::consecutive::kmer::Kmer;
 //      ├──────────┤       │             │
 //      │          │
 
-#[derive(Clone, Copy, Savefile, Encode, Decode, ser_raw::Serialize)]
+#[derive(Clone, Copy, Savefile, Encode, Decode, ser_raw::Serialize, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct KCell(pub u16);
 
@@ -231,44 +231,16 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
     }
 
     pub fn load(filename: &String) -> FMKeys<C, CELLS_PER_BODY> {
-        let mut f = File::open(&filename).expect("no file found");
-        
+        use std::io::Read;
+        let mut f = File::open(filename).expect("Failed to open file");
 
-        // Determine the length of the file
-        let metadata = match f.metadata() {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                panic!("Error getting file metadata: {}", e)
-            }
-        };
+        let mut buffer = Vec::new();
+        f.read_to_end(&mut buffer).expect("Failed to read file");
 
-        let file_size = metadata.len() as usize;
+        // Cast the buffer to &[KCell] using bytemuck
+        let data: &[KCell] = bytemuck::try_cast_slice(&buffer).expect("Buffer not properly aligned or sized for KCell");
 
-        let mut keys = Self::with_capacity(file_size/2);
-
-        // Calculate the number of u16 elements to read
-        let num_u16_elements = file_size / mem::size_of::<KCell>();
-
-
-        // Use unsafe code to reinterpret vec_u16 as a Vec<u8>
-        let vec_u8: &mut [u8] = unsafe {
-            // Get a mutable reference to the entire vec_u16's buffer as u8
-            let ptr = keys.data.as_mut_ptr() as *mut u8;
-            std::slice::from_raw_parts_mut(ptr, num_u16_elements * mem::size_of::<u16>())
-        };
-
-        // Read u8 data directly into vec_u8
-        match f.read_exact(vec_u8) {
-            Ok(_) => {
-                // At this point, vec_u16 contains the data read from the file
-                println!("Data read from file: success");
-            }
-            Err(e) => {
-                panic!("Error reading from file: {}", e);
-            }
-        }
-        keys
-
+        FMKeys { data: data.to_vec() }
     }
 
     pub fn build<const HEADER_THRESHOLD: usize>(&mut self, max_range_size: usize) {

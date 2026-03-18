@@ -254,16 +254,14 @@ pub struct FlexmapBlob<
     values_len: usize,
 }
 
-// Safety: FlexmapBlob is immutable after construction.
-// - `storage` owns the backing bytes and is moved with the struct.
-// - `keys_ptr`/`values_ptr` are derived from `storage` and never mutated.
-// - exposed APIs only hand out shared views (`&[KCell]`, `&[VCell]`, `VRange` with shared slices).
+// `Send`/`Sync` cannot be derived for this type because it stores raw pointers.
+// The pointers are immutable views into `storage`, which is owned by the struct
+// and never reallocated after construction.
 unsafe impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
     Send for FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
 {
 }
 
-// Safety rationale is identical to `Send`: concurrent shared access is read-only.
 unsafe impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
     Sync for FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
 {
@@ -745,6 +743,13 @@ mod tests {
             regular_digest, blob_digest,
             "default dataset digest mismatch between Flexmap and FlexmapBlob"
         );
+    }
+
+    #[test]
+    fn flexmap_blob_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::FlexmapBlob<15, 16, 16, 2>>();
+        assert_send_sync::<super::FlexmapBlob<3, 8, 8, 2>>();
     }
 
     #[test]

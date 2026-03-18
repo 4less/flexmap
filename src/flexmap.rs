@@ -254,6 +254,21 @@ pub struct FlexmapBlob<
     values_len: usize,
 }
 
+// Safety: FlexmapBlob is immutable after construction.
+// - `storage` owns the backing bytes and is moved with the struct.
+// - `keys_ptr`/`values_ptr` are derived from `storage` and never mutated.
+// - exposed APIs only hand out shared views (`&[KCell]`, `&[VCell]`, `VRange` with shared slices).
+unsafe impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
+    Send for FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
+{
+}
+
+// Safety rationale is identical to `Send`: concurrent shared access is read-only.
+unsafe impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
+    Sync for FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
+{
+}
+
 impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
     FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
 {

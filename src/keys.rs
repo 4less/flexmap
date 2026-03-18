@@ -1,6 +1,7 @@
 
-use std::{array, borrow::Borrow, cell::Cell, collections::HashMap, default, error::Error, fs::{self, File}, hash::{BuildHasher, Hash}, intrinsics::size_of, io::{Read, Write}, mem::{self, transmute}, num::Wrapping, process::exit};
+use std::{array, borrow::Borrow, cell::Cell, collections::HashMap, default, error::Error, fs::{self, File}, hash::{BuildHasher, Hash}, intrinsics::size_of, io::{Read, Write}, mem::transmute, num::Wrapping, process::exit};
 use bincode::{Decode, Encode};
+use bytemuck::{Pod, Zeroable};
 use fxhash::FxBuildHasher;
 use savefile::{Deserialize, Serialize, WithSchema};
 use bioreader::utils::time_noerr;
@@ -37,7 +38,7 @@ use kmerrs::consecutive::kmer::Kmer;
 //      ├──────────┤       │             │
 //      │          │
 
-#[derive(Clone, Copy, Savefile, Encode, Decode, ser_raw::Serialize)]
+#[derive(Clone, Copy, Savefile, Encode, Decode, ser_raw::Serialize, Zeroable, Pod)]
 #[repr(C)]
 pub struct KCell(pub u16);
 
@@ -212,62 +213,22 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
         self.get_control_header_value(block_index) as usize
     }
 
-    pub fn save(&mut self, filename: &String) -> () {
-
-        let mut f = File::create(&filename).expect("no file found");
-        // Convert Vec<u16> to raw bytes
-        let bytes: &[u8] = unsafe {
-            // Get a raw pointer to the vector's data
-            let ptr = self.data.as_ptr();
-
-            // Calculate the length of the data in bytes
-            let len = self.data.len() * mem::size_of::<u16>();
-
-            // Create a slice of u8 from the raw pointer and length
-            std::slice::from_raw_parts(ptr as *const u8, len)
-        };
-        
-        f.write_all(bytes);
+    pub fn save(&self, filename: &String) -> () {
+        let mut f = File::create(filename).expect("no file found");
+        let bytes: &[u8] = bytemuck::cast_slice(&self.data);
+        f.write_all(bytes).expect("write failed");
     }
 
     pub fn load(filename: &String) -> FMKeys<C, CELLS_PER_BODY> {
-        let mut f = File::open(&filename).expect("no file found");
-        
-
-        // Determine the length of the file
-        let metadata = match f.metadata() {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                panic!("Error getting file metadata: {}", e)
-            }
-        };
-
-        let file_size = metadata.len() as usize;
-
-        let mut keys = Self::with_capacity(file_size/2);
-
-        // Calculate the number of u16 elements to read
-        let num_u16_elements = file_size / mem::size_of::<KCell>();
-
-
-        // Use unsafe code to reinterpret vec_u16 as a Vec<u8>
-        let vec_u8: &mut [u8] = unsafe {
-            // Get a mutable reference to the entire vec_u16's buffer as u8
-            let ptr = keys.data.as_mut_ptr() as *mut u8;
-            std::slice::from_raw_parts_mut(ptr, num_u16_elements * mem::size_of::<u16>())
-        };
-
-        // Read u8 data directly into vec_u8
-        match f.read_exact(vec_u8) {
-            Ok(_) => {
-                // At this point, vec_u16 contains the data read from the file
-                println!("Data read from file: success");
-            }
-            Err(e) => {
-                panic!("Error reading from file: {}", e);
-            }
-        }
-        keys
+        let mut f = File::open(filename).expect("no file found");
+        let mut bytes = Vec::<u8>::new();
+        f.read_to_end(&mut bytes).expect("read failed");
+        let cell_size = std::mem::size_of::<KCell>();
+        assert!(bytes.len() % cell_size == 0, "invalid key file size");
+        let len = bytes.len() / cell_size;
+        let mut data = vec![KCell(0); len];
+        bytemuck::cast_slice_mut::<KCell, u8>(&mut data).copy_from_slice(&bytes);
+        FMKeys { data }
 
     }
 
@@ -326,7 +287,7 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
 }  
 
 
-#[derive(Clone, Encode, Decode, Savefile)]
+#[derive(Clone, Copy, Encode, Decode, Savefile, Zeroable, Pod)]
 #[repr(C)]
 pub struct KHashEntry {
     pub key: u32,
@@ -352,6 +313,39 @@ impl FMKeysHash {
         Self {
             data: vec![KHashEntry::default(); capacity],
             load_factor: 0.6,
+        }
+    }
+
+    pub fn save(&self, filename: &String) -> () {
+        let mut f = File::create(filename).expect("no file found");
+        let len = self.data.len() as u64;
+        f.write_all(&len.to_le_bytes()).expect("write failed");
+        f.write_all(&self.load_factor.to_le_bytes()).expect("write failed");
+        let bytes: &[u8] = bytemuck::cast_slice(&self.data);
+        f.write_all(bytes).expect("write failed");
+    }
+
+    pub fn load(filename: &String) -> Self {
+        let mut f = File::open(filename).expect("no file found");
+        let mut len_bytes = [0u8; 8];
+        f.read_exact(&mut len_bytes).expect("read failed");
+        let len = u64::from_le_bytes(len_bytes) as usize;
+
+        let mut load_factor_bytes = [0u8; 8];
+        f.read_exact(&mut load_factor_bytes).expect("read failed");
+        let load_factor = f64::from_le_bytes(load_factor_bytes);
+
+        let mut bytes = Vec::<u8>::new();
+        f.read_to_end(&mut bytes).expect("read failed");
+        let entry_size = std::mem::size_of::<KHashEntry>();
+        assert!(bytes.len() % entry_size == 0, "invalid hash key file size");
+        let mut data = vec![KHashEntry::default(); bytes.len() / entry_size];
+        bytemuck::cast_slice_mut::<KHashEntry, u8>(&mut data).copy_from_slice(&bytes);
+        assert_eq!(data.len(), len, "hash key file length mismatch");
+
+        Self {
+            data,
+            load_factor,
         }
     }
 }
@@ -608,4 +602,3 @@ mod tests {
         });
     }
 }
-

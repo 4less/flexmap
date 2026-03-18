@@ -2,10 +2,10 @@ use std::cmp::Ordering::{Equal, Greater, Less};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::iter::zip;
-use std::mem;
 use std::{cmp::Ordering, fmt::Display, slice};
 
 use bincode::{Decode, Encode};
+use bytemuck::{Pod, Zeroable};
 use kmerrs::consecutive::kmer::Kmer;
 
 use crate::VD;
@@ -80,7 +80,7 @@ impl<const VAL_BITS: usize, const POS_BITS: usize> VData<VAL_BITS, POS_BITS> {
     }
 }
 
-#[derive(Clone, Savefile, ser_raw::Serialize, Encode, Decode)]
+#[derive(Clone, Copy, Savefile, ser_raw::Serialize, Encode, Decode, Zeroable, Pod)]
 #[repr(C)]
 pub struct VCell(pub u64);
 
@@ -405,59 +405,22 @@ impl<const F: usize, const HEADER_THRESHOLD: usize> FMValues<F, HEADER_THRESHOLD
         // let v = unsafe { slice::from_raw_parts(value.as_ptr() as *const i8, value.len()) };
     }
 
-    pub fn save(&mut self, filename: &String) -> () {
-        let mut f = File::create(&filename).expect("no file found");
-        // Convert Vec<u16> to raw bytes
-        let bytes: &[u8] = unsafe {
-            // Get a raw pointer to the vector's data
-            let ptr = self.data.as_ptr();
-
-            // Calculate the length of the data in bytes
-            let len = self.data.len() * mem::size_of::<u64>();
-
-            // Create a slice of u8 from the raw pointer and length
-            std::slice::from_raw_parts(ptr as *const u8, len)
-        };
-
-        f.write_all(bytes);
+    pub fn save(&self, filename: &String) -> () {
+        let mut f = File::create(filename).expect("no file found");
+        let bytes: &[u8] = bytemuck::cast_slice(&self.data);
+        f.write_all(bytes).expect("write failed");
     }
 
     pub fn load(filename: &String) -> FMValues<F, HEADER_THRESHOLD> {
-        let mut f = File::open(&filename).expect("no file found");
-
-        // Determine the length of the file
-        let metadata = match f.metadata() {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                panic!("Error getting file metadata: {}", e)
-            }
-        };
-
-        let file_size = metadata.len() as usize;
-
-        let mut keys = Self::with_capacity(file_size / 8);
-
-        // Calculate the number of u16 elements to read
-        let num_u16_elements = file_size / mem::size_of::<VCell>();
-
-        // Use unsafe code to reinterpret vec_u16 as a Vec<u8>
-        let vec_u8: &mut [u8] = unsafe {
-            // Get a mutable reference to the entire vec_u16's buffer as u8
-            let ptr = keys.data.as_mut_ptr() as *mut u8;
-            std::slice::from_raw_parts_mut(ptr, num_u16_elements * mem::size_of::<VCell>())
-        };
-
-        // Read u8 data directly into vec_u8
-        match f.read_exact(vec_u8) {
-            Ok(_) => {
-                // At this point, vec_u16 contains the data read from the file
-                println!("Data read from file: success");
-            }
-            Err(e) => {
-                panic!("Error reading from file: {}", e);
-            }
-        }
-        keys
+        let mut f = File::open(filename).expect("no file found");
+        let mut bytes = Vec::<u8>::new();
+        f.read_to_end(&mut bytes).expect("read failed");
+        let cell_size = std::mem::size_of::<VCell>();
+        assert!(bytes.len() % cell_size == 0, "invalid values file size");
+        let len = bytes.len() / cell_size;
+        let mut data = vec![VCell(0); len];
+        bytemuck::cast_slice_mut::<VCell, u8>(&mut data).copy_from_slice(&bytes);
+        FMValues { data }
     }
 }
 

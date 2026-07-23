@@ -63,6 +63,10 @@ fn main() {
         run_bench_access_c15f16(&args);
         return;
     }
+    if args.len() >= 2 && args[1] == "bench-flex" {
+        run_bench_flex(&args);
+        return;
+    }
 
     // println!("Main");
     // let testvec = vec![0u16, 1u16, 2u16, 3u16];
@@ -321,6 +325,69 @@ fn scan_all_prefetched<const C: usize, const F: usize, const CPB: u64, const HT:
         }
     }
     total
+}
+
+fn run_bench_flex(args: &[String]) {
+    use flexmap::values::{
+        min_dist_and_count, min_dist_and_count_avx2, min_dist_and_count_avx512,
+        min_dist_and_count_scalar, HeaderSeq,
+    };
+
+    let n = args.get(2).and_then(|v| v.parse::<usize>().ok()).unwrap_or(4096);
+    let iters = args.get(3).and_then(|v| v.parse::<usize>().ok()).unwrap_or(200_000);
+
+    // Build a header block of `n` pseudo-random packed 16-mers and a stream of query flanks.
+    let mut s = 0x9E3779B97F4A7C15u64;
+    let mut next = || {
+        s ^= s >> 12;
+        s ^= s << 25;
+        s ^= s >> 27;
+        s.wrapping_mul(0x2545F4914F6CDD1D)
+    };
+    let headers: Vec<HeaderSeq> = (0..n).map(|_| HeaderSeq::from_raw(next() as u32)).collect();
+    let flexes: Vec<u32> = (0..iters).map(|_| next() as u32).collect();
+
+    let avx2 = std::is_x86_feature_detected!("avx2");
+    let avx512 = std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512bw")
+        && std::is_x86_feature_detected!("avx512vpopcntdq");
+
+    // Correctness cross-check before timing.
+    for &f in flexes.iter().take(64) {
+        let r = min_dist_and_count_scalar(&headers, f);
+        if avx2 { assert_eq!(r, min_dist_and_count_avx2(&headers, f), "avx2 mismatch"); }
+        if avx512 { assert_eq!(r, min_dist_and_count_avx512(&headers, f), "avx512 mismatch"); }
+        assert_eq!(r, min_dist_and_count(&headers, f), "dispatch mismatch");
+    }
+
+    let time = |label: &str, f: &dyn Fn(&[HeaderSeq], u32) -> (u32, u32)| {
+        // warm
+        let mut acc = 0u64;
+        for &fl in &flexes { acc = acc.wrapping_add(f(&headers, fl).0 as u64); }
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let start = Instant::now();
+            let mut a = 0u64;
+            for &fl in &flexes { a = a.wrapping_add(f(&headers, fl).0 as u64); }
+            best = best.min(start.elapsed().as_secs_f64());
+            acc = acc.wrapping_add(a);
+        }
+        let cmps = (n * iters) as f64; // header comparisons performed
+        println!(
+            "  {label:<8} {:.4} s  ({:.2} G cmp/s)   [checksum {}]",
+            best, (cmps / best) / 1e9, acc & 0xffff
+        );
+    };
+
+    println!("Flex-match reduction benchmark: n={n} headers, iters={iters} queries");
+    println!("  CPU: avx2={avx2} avx512vpopcntdq={avx512}");
+    time("scalar", &min_dist_and_count_scalar);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if avx2 { time("avx2", &min_dist_and_count_avx2); }
+        if avx512 { time("avx512", &min_dist_and_count_avx512); }
+    }
+    time("dispatch", &min_dist_and_count);
 }
 
 fn scan_all<T: flexmap::flexmap::VRangeGetter>(map: &T, queries: &[u64]) -> usize {

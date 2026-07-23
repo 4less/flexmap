@@ -310,33 +310,6 @@ impl<'a> VRangeMut<'a> {
     pub fn new(header: Option<&'a mut [HeaderSeq]>, positions: &'a mut [VCell]) -> Self {
         Self { header, positions }
     }
-
-    fn to_verbose_string<const V: usize, const P: usize>(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> String {
-        match &self.header {
-            Some(header) => {
-                assert_eq!(header.len(), self.positions.len());
-                for idx in 0..header.len() {
-                    let (val, pos) = VD::get(self.positions[idx].0);
-                    let _ = write!(f, "{}: {} {}\n", header[idx].to_string(), val, pos);
-                }
-                let mut string = String::new();
-                f.write_str(&string);
-                return string;
-            }
-            None => {
-                for idx in 0..self.positions.len() {
-                    let (val, pos) = VD::get(self.positions[idx].0);
-                    let _ = write!(f, "............. {} {}\n", val, pos);
-                }
-                let mut string = String::new();
-                f.write_str(&string);
-                return string;
-            }
-        }
-    }
 }
 
 #[derive(Clone, Savefile, ser_raw::Serialize, Encode, Decode)]

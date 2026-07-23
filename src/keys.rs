@@ -1,10 +1,7 @@
 
-use std::{array, borrow::Borrow, cell::Cell, collections::HashMap, default, error::Error, fs::{self, File}, hash::{BuildHasher, Hash}, intrinsics::size_of, io::{Read, Write}, mem::transmute, num::Wrapping, process::exit};
+use std::{fs::File, intrinsics::size_of, io::{Read, Write}};
 use bincode::{Decode, Encode};
 use bytemuck::{Pod, Zeroable};
-use fxhash::FxBuildHasher;
-use savefile::{Deserialize, Serialize, WithSchema};
-use bioreader::utils::time_noerr;
 use kmerrs::consecutive::kmer::Kmer;
 
 #[derive(Debug)]
@@ -52,21 +49,10 @@ impl KCell {
     }
 }
 
-pub const fn table_size<const C: usize, const CELLS_PER_BODY: u64>() -> usize {
-    let number_of_keys: u64 = usize::pow(2, (C*2) as u32) as u64;
-    let KEY_TO_CTRL_BLOCK_SHIFT: u64 = CELLS_PER_BODY.ilog2() as u64;
-    let CELLS_PER_HEAD = 4;
-    ((number_of_keys) + ((number_of_keys >> KEY_TO_CTRL_BLOCK_SHIFT) * CELLS_PER_HEAD) + CELLS_PER_HEAD) as usize
-}
-
-
-
-
 #[derive(Clone, Savefile, Encode, Decode, ser_raw::Serialize)]
 #[repr(C)]
-pub struct FMKeys<const C: usize, const CELLS_PER_BODY: u64> { //where [(); table_size::<C,CELLS_PER_BODY>()]: 
+pub struct FMKeys<const C: usize, const CELLS_PER_BODY: u64> {
     pub data: Vec<KCell>,
-    // data: [KCell; ],
 }
 
 /// One control block contains of HEAD and BODY, the HEAD contains the offset position for all 
@@ -138,41 +124,11 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
     }
 
 
-    pub fn get_value(data: &[u16]) -> u64 {
-        (data[0] as u64) | 
-        (data[1] as u64) << 16 | 
-        (data[2] as u64) << 32 | 
-        (data[3] as u64) << 48
-    }
-
-    // #[inline(always)]
+    #[inline(always)]
     pub fn get_control_header_value(&self, index: usize) -> u64 {
         unsafe {
             *self.data.as_ptr().add(index).cast::<u64>()
         }
-    }
-
-    // #[inline(always)]
-    fn get_control_header_value3(&self, index: usize) -> u64 {
-        let (duration, result) = time_noerr(|| self.data[index]);
-        println!("Data Access:  {:?}, {}", duration, result.0);
-
-        let (duration, result) = time_noerr(|| unsafe {
-            *self.data.as_ptr().add(index).cast::<u64>()
-        });
-        println!("Unsafe:       {:?}, {}", duration, result);
-
-        unsafe {
-            *self.data.as_ptr().add(index).cast::<u64>()
-        }
-    }
-
-    // #[inline(always)]
-    fn get_control_header_value2(&self, index: usize) -> u64 {
-        (self.data[index].0 as u64) +
-        (self.data[index+1].0 as u64) << 16 + 
-        (self.data[index+2].0 as u64) << 32 + 
-        (self.data[index+3].0 as u64) << 48
     }
 
     pub fn set_control_header_value(&mut self, index: usize, value: u64) {
@@ -195,12 +151,6 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
     pub fn new() -> FMKeys<C, CELLS_PER_BODY> {
         FMKeys {
             data: vec![KCell(0); Self::table_size().try_into().unwrap()],
-        }
-    }
-
-    pub fn with_capacity(capacity: usize) -> FMKeys<C, CELLS_PER_BODY> {
-        FMKeys {
-            data: Vec::with_capacity(capacity),
         }
     }
 
@@ -245,7 +195,6 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
         let size = u64::pow(2, C as u32*2);
 
         let mut set_keys = 0;
-        let last_block_index = 0;
         for ckmer in 0..size {
             let kmer = Kmer::<C>(ckmer);
             let ckmer_block_index = Self::kmer_to_ctrl_block_index(ckmer);
@@ -285,197 +234,6 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
 
 
 }  
-
-
-#[derive(Clone, Copy, Encode, Decode, Savefile, Zeroable, Pod)]
-#[repr(C)]
-pub struct KHashEntry {
-    pub key: u32,
-    pub range_len: u32,
-    pub range_start: u64,
-}
-
-impl Default for KHashEntry {
-    fn default() -> Self {
-        Self { key: 0, range_len: 0, range_start: 0 }
-    }
-}
-
-#[derive(Clone, Savefile, Encode, Decode)]
-#[repr(C)]
-pub struct FMKeysHash {
-    pub data: Vec<KHashEntry>,
-    pub load_factor: f64,
-}
-
-impl FMKeysHash {
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: vec![KHashEntry::default(); capacity],
-            load_factor: 0.6,
-        }
-    }
-
-    pub fn save(&self, filename: &String) -> () {
-        let mut f = File::create(filename).expect("no file found");
-        let len = self.data.len() as u64;
-        f.write_all(&len.to_le_bytes()).expect("write failed");
-        f.write_all(&self.load_factor.to_le_bytes()).expect("write failed");
-        let bytes: &[u8] = bytemuck::cast_slice(&self.data);
-        f.write_all(bytes).expect("write failed");
-    }
-
-    pub fn load(filename: &String) -> Self {
-        let mut f = File::open(filename).expect("no file found");
-        let mut len_bytes = [0u8; 8];
-        f.read_exact(&mut len_bytes).expect("read failed");
-        let len = u64::from_le_bytes(len_bytes) as usize;
-
-        let mut load_factor_bytes = [0u8; 8];
-        f.read_exact(&mut load_factor_bytes).expect("read failed");
-        let load_factor = f64::from_le_bytes(load_factor_bytes);
-
-        let mut bytes = Vec::<u8>::new();
-        f.read_to_end(&mut bytes).expect("read failed");
-        let entry_size = std::mem::size_of::<KHashEntry>();
-        assert!(bytes.len() % entry_size == 0, "invalid hash key file size");
-        let mut data = vec![KHashEntry::default(); bytes.len() / entry_size];
-        bytemuck::cast_slice_mut::<KHashEntry, u8>(&mut data).copy_from_slice(&bytes);
-        assert_eq!(data.len(), len, "hash key file length mismatch");
-
-        Self {
-            data,
-            load_factor,
-        }
-    }
-}
-
-impl KHashEntry {
-    pub fn is_empty(&self) -> bool {
-        return self.range_len == 0;
-    }
-}
-
-impl FMKeysHash {
-    #[inline(always)]
-    pub fn hash(key: u64) -> u64 {
-        let mut k = Wrapping(key);
-        k ^= k >> 33;
-        k *= 0xff51afd7ed558ccd;
-        k ^= k >> 33;
-        k *= 0xc4ceb9fe1a85ec53;
-        k ^= k >> 33;
-        return k.0;
-    }
-
-    pub fn insert(&mut self, mut key: u32, mut range_start: u64, mut range_len: u32) -> Option<()> {
-        let mut index = Self::hash(key as u64) as usize % self.data.len();
-        let mut distance = 0;
-
-        loop {
-            if unsafe { self.data.get_unchecked(index).is_empty() } {
-                // If the cell is empty, fill it and return
-                let cell = unsafe { self.data.get_unchecked_mut(index) };
-                cell.key = key;
-                cell.range_start = range_start;
-                cell.range_len = range_len;
-
-                return Some(());
-            }
-
-            let cell_hash_distance = {
-                let cell = unsafe { self.data.get_unchecked(index) };
-                let cell_hash = Self::hash(cell.key as u64) as usize % self.data.len();
-                let cell_hash_distance = if index > cell_hash {
-                    index - cell_hash
-                } else {
-                    index + self.data.len() - cell_hash
-                };
-    
-                cell_hash_distance
-            };
-    
-            // After the block, the mutable borrow ends, and you can safely borrow `self.data` again
-            if cell_hash_distance < distance {
-                // Reborrow the cell mutably just for the swap operation
-                let cell = unsafe { self.data.get_unchecked_mut(index) };
-                std::mem::swap(&mut cell.key, &mut key);
-                std::mem::swap(&mut cell.range_start, &mut range_start);
-                std::mem::swap(&mut cell.range_len, &mut range_len);
-                distance = cell_hash_distance;
-            }
-    
-            // Increment the distance and move to the next cell
-            distance += 1;
-            index += 1;
-            if index >= self.data.len() { index -= self.data.len() };
-
-            if distance > self.data.len() {
-                panic!("Insert failed due to insufficient coverage");
-            }
-        }
-    }
-
-    pub fn get(&self, key: u32) -> Option<(usize, usize)> {
-        let mut index = Self::hash(key as u64) as usize % self.data.len();
-
-        let mut distance = 0;
-        let mut cell_hash_distance = {
-            let cell = unsafe { self.data.get_unchecked(index) };
-            let cell_hash = Self::hash(cell.key as u64) as usize % self.data.len();
-            let cell_hash_distance = if index > cell_hash {
-                index - cell_hash
-            } else {
-                index + self.data.len() - cell_hash
-            };
-
-            cell_hash_distance
-        };
-
-        while distance <= cell_hash_distance {
-            let cell = unsafe { self.data.get_unchecked(index) };
-
-            if key == cell.key {
-                return Some((cell.range_start as usize, cell.range_len as usize));
-            }
-            distance += 1;
-            index += 1;
-            if index >= self.data.len() { index -= self.data.len() };
-
-            cell_hash_distance = {
-                let cell = unsafe { self.data.get_unchecked(index) };
-                let cell_hash = Self::hash(cell.key as u64) as usize % self.data.len();
-                let cell_hash_distance = if index > cell_hash {
-                    index - cell_hash
-                } else {
-                    index + self.data.len() - cell_hash
-                };
-    
-                cell_hash_distance
-            };
-
-            if distance > self.data.len() {
-                panic!("Get failed due to insufficient coverage");
-            }
-        }
-        None
-    }
-}
-
-
-
-// pub struct HashKeys {
-//     pub data: KeysHashSmall,
-// }
-
-impl FMKeysHash {
-    pub fn vrange(&self, canonical_kmer: u64) -> Option<(usize, usize)> {
-        match self.get(canonical_kmer as u32) {
-            Some(entry) => Some((entry.0, entry.0 + entry.1)),
-            None => None,
-        }
-    }
-}
 
 
 #[cfg(test)]
@@ -537,68 +295,4 @@ mod tests {
         assert_eq!(keys.get_control_header_value(0), 42);
     }
 
-    #[test]
-    fn test_fm_keys_hash() {
-        let capa = 100_000;
-        let mut hashmap = FMKeysHash::with_capacity(capa);
-
-        for i in 0..capa {
-            let key = i as u32;
-            let range_start = i as u64;
-            hashmap.insert(key, range_start, 1);
-            assert!(hashmap.get(key).unwrap() == (range_start as usize, 1))
-        }
-
-        for i in 0..capa {
-            let key = i as u32;
-            let range_start = i as u64;
-            assert!(hashmap.get(key).unwrap() == (range_start as usize, 1))
-        }
-    }
-
-    #[bench]
-    fn bench_fm_keys_hash(b: &mut Bencher) {
-        let size = 100_000;
-        let load_factor = 0.6;
-        let capa = (size as f64 * (1.0/load_factor)) as usize;
-        let mut hashmap = FMKeysHash::with_capacity(capa);
-
-        for i in 0..size {
-            let key = i as u32;
-            let range_start = i as u64;
-            hashmap.insert(key, range_start, 1);
-            assert!(hashmap.get(key).unwrap() == (range_start as usize, 1))
-        }
-
-        b.iter(|| {
-            for i in 0..size {
-                let key = i as u32;
-                let range_start = i as u64;
-                assert!(hashmap.get(key).unwrap() == (range_start as usize, 1))
-            }
-        });
-    }
-
-    #[bench]
-    fn bench_std_hashmap(b: &mut Bencher) {
-        let size = 100_000;
-        let load_factor = 0.6;
-        let capa = (size as f64 * (1.0/load_factor)) as usize;
-        let mut hashmap = HashMap::<u32, (u32, u64)>::with_capacity(capa);
-
-        for i in 0..size {
-            let key = i as u32;
-            let range_start = i as u64;
-            hashmap.insert(key, (1,  range_start));
-            assert!(hashmap.get(&key).unwrap() == &(1, range_start))
-        }
-
-        b.iter(|| {
-            for i in 0..size {
-                let key = i as u32;
-                let range_start = i as u64;
-                assert!(hashmap.get(&key).unwrap() == &(1, range_start))
-            }
-        });
-    }
 }

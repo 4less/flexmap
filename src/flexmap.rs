@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
 use std::slice;
 
-use crate::keys::{FMKeys, FMKeysHash, KCell};
+use crate::keys::{FMKeys, KCell};
 use crate::values::{FMValues, HeaderSeq, VCell, VRange};
 
 pub type FlexmapStd = Flexmap<15, 16, 16, 2>;
@@ -13,26 +12,12 @@ pub type FMKeysStd = FMKeys<15, 16>;
 pub type FlexmapSmall = Flexmap<3, 10, 16, 2>;
 pub type FMKeysSmall = FMKeys<3, 16>;
 
-
-pub type KeysHashSmall = HashMap<u32, (u32, u32)>;
-
 use bincode::{Decode, Encode};
-use bioreader::utils::{time, time_noerr};
 use savefile::prelude::*;
 use ser_raw::{Serialize, Serializer};
-// use savefile_derive::Savefile;
-
-
-pub trait FlexOptions {
-    
-}
 
 pub trait VRangeGetter {
     fn get_vrange(&self, canonical_kmer: u64) -> Option<VRange>;
-}
-
-pub trait DBBuilder {
-    fn build(options: impl FlexOptions) -> Self;
 }
 
 const FLEXMAP_BLOB_MAGIC: [u8; 8] = *b"FMBLOB01";
@@ -201,45 +186,6 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
 }
 
 
-#[derive(Clone, Savefile, Encode, Decode)]
-#[repr(C)]
-pub struct FlexmapHash<
-    const C: usize,
-    const F: usize,
-    const HEADER_THRESHOLD: usize,
-> {
-    pub keys: FMKeysHash,
-    pub values: FMValues<F, HEADER_THRESHOLD>,
-}
-
-impl<const C: usize, const F: usize, const HEADER_THRESHOLD: usize>
-FlexmapHash<C, F, HEADER_THRESHOLD>
-{
-    pub fn new(
-        keys: FMKeysHash,
-    ) -> FlexmapHash<C, F, HEADER_THRESHOLD> {
-        let size = keys.data.iter().fold(0, |acc, entry| {
-            acc + entry.range_len
-        });
-        FlexmapHash {
-            keys,
-            values: FMValues::new(size as usize),
-        }
-    }
-
-    pub fn save(&self, keys_file: &String, values_file: &String) -> () {
-        self.keys.save(keys_file);
-        self.values.save(values_file);
-    }
-
-    pub fn load(keys_file: &String, values_file: &String) -> Self {
-        Self {
-            keys: FMKeysHash::load(keys_file),
-            values: FMValues::load(values_file),
-        }
-    }
-}
-
 /// Where a [`FlexmapBlob`]'s bytes live: either read fully into a heap buffer, or a lazy
 /// memory-map of the blob file (the OS pages in only the regions actually touched). Both keep the
 /// backing bytes at a stable address for the struct's lifetime, so the raw pointers stay valid.
@@ -291,8 +237,10 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
 }
 
 // `Send`/`Sync` cannot be derived for this type because it stores raw pointers.
-// The pointers are immutable views into `storage`, which is owned by the struct
-// and never reallocated after construction.
+// The pointers are immutable views into the bytes owned by `backing` (an `Arc<BlobBacking>`,
+// either a heap `Vec<u64>` or a memory-map). The backing is never mutated or reallocated after
+// construction, and clones share the same `Arc`, so the pointers stay valid for every clone's
+// lifetime.
 unsafe impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
     Send for FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
 {
@@ -534,19 +482,6 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
     }
 }
 
-
-impl<const C: usize, const F: usize, const HEADER_THRESHOLD: usize> VRangeGetter for 
-FlexmapHash<C, F, HEADER_THRESHOLD> {
-    /// Gets the VRange for a given k-mer (represented as u64). A VRange has an optional header section and a value section. 
-    /// The if there is more than HEADER_THRESHOLD items in the value section, there will be a header, otherwise not. The
-    /// header contains additional information about the flanking regions of the k-mer (parameter F). Returns None if 
-    /// No such key is stored in the flexmap.
-    fn get_vrange(&self, canonical_kmer: u64) -> Option<VRange> {
-        let range = self.keys.get(canonical_kmer as u32)?;
-        Some(self.values.get_range((range.0, range.0 + range.1)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -557,8 +492,7 @@ mod tests {
     use kmerrs::consecutive::kmer::KmerIter;
 
     use crate::example::build_flexmap;
-    use crate::flexmap::{Flexmap, FlexmapHash, VRangeGetter};
-    use crate::keys::FMKeysHash;
+    use crate::flexmap::{Flexmap, VRangeGetter};
     use crate::{keys::{FMKeys, KCell}, values::VCell, VD};
     use test::{black_box, Bencher};
 
@@ -612,6 +546,61 @@ mod tests {
         fs::remove_file(&path).expect("failed to cleanup blob test file");
     }
 
+    fn temp_blob_path(tag: &str) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time drift")
+            .as_nanos();
+        env::temp_dir()
+            .join(format!("flexmap_{}_{}_{}.bin", tag, std::process::id(), now))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// The memory-mapped loader must return byte-for-byte identical query results to both the
+    /// in-heap blob loader and the original `Flexmap`. This is the only coverage for `mmap_from_file`.
+    #[test]
+    fn flexmap_blob_mmap_matches_flexmap_queries() {
+        let flexmap = build_flexmap();
+        let filename = temp_blob_path("mmap_compare");
+        flexmap.save_blob(&filename);
+
+        let mmapped = super::FlexmapBlob::<3, 8, 8, 2>::mmap_from_file(&filename);
+        let heaped = Flexmap::<3, 8, 8, 2>::load_blob(&filename);
+
+        assert_eq!(mmapped.keys().len(), flexmap.keys.data.len(), "key length mismatch");
+        assert_eq!(mmapped.values().len(), flexmap.values.data.len(), "value length mismatch");
+
+        let ckmer_space = 1u64 << (3 * 2);
+        for ckmer in 0..ckmer_space {
+            assert_vrange_equal(flexmap.get_vrange(ckmer), mmapped.get_vrange(ckmer));
+            assert_vrange_equal(heaped.get_vrange(ckmer), mmapped.get_vrange(ckmer));
+        }
+
+        fs::remove_file(&filename).expect("failed to cleanup mmap test file");
+    }
+
+    /// A cloned blob shares the same backing (Arc) and must answer queries identically to the
+    /// original -- the raw pointers stay valid views into the shared bytes.
+    #[test]
+    fn flexmap_blob_clone_matches_original() {
+        let flexmap = build_flexmap();
+        let filename = temp_blob_path("clone_compare");
+        flexmap.save_blob(&filename);
+
+        let blob = Flexmap::<3, 8, 8, 2>::load_blob(&filename);
+        let clone = blob.clone();
+        // Drop the original; the clone's shared Arc backing must keep the bytes alive.
+        drop(blob);
+
+        let ckmer_space = 1u64 << (3 * 2);
+        for ckmer in 0..ckmer_space {
+            assert_vrange_equal(flexmap.get_vrange(ckmer), clone.get_vrange(ckmer));
+        }
+
+        fs::remove_file(&filename).expect("failed to cleanup clone test file");
+    }
+
     fn build_quiet_flexmap() -> Flexmap<3, 8, 8, 2> {
         const C: usize = 3;
         const F: usize = 8;
@@ -638,27 +627,6 @@ mod tests {
         }
 
         flexmap
-    }
-
-    fn build_hash_from_flexmap(flexmap: &Flexmap<3, 8, 8, 2>) -> FlexmapHash<3, 8, 2> {
-        let kmer_space = 1u64 << (3 * 2);
-        let mut entries = Vec::<(u32, u64, u32)>::new();
-        for ckmer in 0..kmer_space {
-            if let Some((start, end)) = flexmap.keys.vrange(ckmer) {
-                entries.push((ckmer as u32, start as u64, (end - start) as u32));
-            }
-        }
-
-        let capacity = (entries.len() * 4).next_power_of_two().max(16);
-        let mut keys = FMKeysHash::with_capacity(capacity);
-        for (key, start, len) in entries {
-            keys.insert(key, start, len).expect("hash insert failed");
-        }
-
-        FlexmapHash::<3, 8, 2> {
-            keys,
-            values: flexmap.values.clone(),
-        }
     }
 
     fn build_query_keys(iterations: usize) -> Vec<u64> {
@@ -716,18 +684,6 @@ mod tests {
 
         b.iter(|| {
             let total = scan_all(&blob, &queries);
-            black_box(total);
-        });
-    }
-
-    #[bench]
-    fn bench_get_vrange_flexmap_hash(b: &mut Bencher) {
-        let flexmap = build_quiet_flexmap();
-        let hash = build_hash_from_flexmap(&flexmap);
-        let queries = build_query_keys(1 << 20);
-
-        b.iter(|| {
-            let total = scan_all(&hash, &queries);
             black_box(total);
         });
     }
@@ -928,6 +884,75 @@ mod tests {
         assert_eq!(
             regular_digest, blob_digest,
             "sampled digest mismatch between Flexmap and FlexmapBlob"
+        );
+    }
+
+    /// Performance regression guard for the `FlexmapBlob` query path.
+    ///
+    /// The lookup is O(1): a fixed handful of memory accesses per query, independent of range or
+    /// table size. This test defends that property against accidental algorithmic regressions
+    /// (e.g. someone turning `vrange_from_keys`/`get_range_from_values` into an O(range) or
+    /// O(table) scan). It compares the blob's per-query cost to the plain `Flexmap` reference,
+    /// which does equivalent work over the same values layout.
+    ///
+    /// Only the *ratio* is asserted, so the guard is independent of machine speed and of the
+    /// debug/release build profile (both sides scale together). Absolute throughput is printed for
+    /// humans; for tracking real numbers over time use the release harness `bench-access-c15f16`.
+    /// The factor is deliberately generous to avoid CI flakiness -- it catches order-of-magnitude
+    /// regressions, not small constant-factor drift.
+    #[test]
+    fn perf_regression_blob_query_path() {
+        use std::time::Instant;
+
+        // Coarsely calibrate to this machine: a blown ratio means the blob path regressed
+        // relative to the reference, not that the machine is slow.
+        const ROUNDS: usize = 7;
+        const MAX_BLOB_OVER_FLEXMAP: f64 = 4.0;
+
+        let flexmap = build_quiet_flexmap();
+        let filename = temp_blob_path("perf_regression");
+        flexmap.save_blob(&filename);
+        let blob = Flexmap::<3, 8, 8, 2>::load_blob(&filename);
+        fs::remove_file(&filename).expect("failed to cleanup perf test file");
+
+        let queries = build_query_keys(1 << 18);
+
+        // Warm caches / branch predictors for both paths before timing.
+        black_box(scan_all(&flexmap, &queries));
+        black_box(scan_all(&blob, &queries));
+
+        // Take the best (min) of several rounds to suppress scheduler/CI noise.
+        let best = |run: &dyn Fn() -> usize| -> f64 {
+            let mut best = f64::INFINITY;
+            for _ in 0..ROUNDS {
+                let start = Instant::now();
+                black_box(run());
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            best
+        };
+
+        let flex_t = best(&|| scan_all(&flexmap, &queries));
+        let blob_t = best(&|| scan_all(&blob, &queries));
+
+        let mq = |t: f64| (queries.len() as f64 / t) / 1e6;
+        eprintln!(
+            "perf_regression_blob_query_path: flexmap {:.2} Mq/s, blob {:.2} Mq/s, ratio blob/flexmap = {:.2}",
+            mq(flex_t),
+            mq(blob_t),
+            blob_t / flex_t,
+        );
+
+        assert!(
+            blob_t <= flex_t * MAX_BLOB_OVER_FLEXMAP,
+            "FlexmapBlob query path regressed: blob {:.6}s vs flexmap {:.6}s over {} queries \
+             (ratio {:.2} > allowed {:.1}x). The blob lookup should stay O(1); check \
+             vrange_from_keys / get_range_from_values for an accidental linear scan.",
+            blob_t,
+            flex_t,
+            queries.len(),
+            blob_t / flex_t,
+            MAX_BLOB_OVER_FLEXMAP,
         );
     }
 }

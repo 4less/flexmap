@@ -1,6 +1,6 @@
 use std::{cmp::min, collections::HashMap, fs::File, io::BufRead, path::Path, sync::{Arc, Mutex}};
 
-use kmerrs::{consecutive::kmer::KmerIter, minimizer::context_free::Minimizer, syncmer::closed_syncmer::ClosedSyncmer};
+use kmerrs::{consecutive::kmer::KmerIter, kmer_utils::mask_coremer, minimizer::context_free::Minimizer, syncmer::closed_syncmer::ClosedSyncmer};
 use bioreader::{fasta_byte_reader::{self, FastaByteReader}, fasta_reader::{self, FastaReader}, fastq_byte_reader, fastq_reader, sequence::fasta_record::OwnedFastaRecord};
 use savefile::save;
 
@@ -101,19 +101,16 @@ fn default_build_keys<
             for (_, kmer_fwd, kmer_rev) in iter {
                 let cmer_fwd = kmer_fwd.middle::<C>();
                 let cmer_rev = kmer_rev.middle::<C>();
-                let kmer = if cmer_fwd < cmer_rev { kmer_fwd } else { kmer_rev };
+                let _kmer = if cmer_fwd < cmer_rev { kmer_fwd } else { kmer_rev };
                 let cmer = min(cmer_fwd, cmer_rev);
 
                 if !cs.is_minimizer(cmer.0) { continue };
 
-                // if cmer.is_own_rc() { continue };
-
-                // println!("{:?}", cmer.to_string());
-
-                // let table_size = keys::FMKeys::<C, CELLS_PER_BODY>::table_size();
-                // let index = keys::FMKeys::<C, CELLS_PER_BODY>::kmer_to_ctrl_block_index(cmer.0);
-
-                keys.get_kmer_cell_mut_ref(cmer.0).increment();
+                // Selection stays on the raw canonical core-mer (sampling unchanged); only the
+                // direct-addressed KEY is mixed, so the populated keys spread uniformly over the key
+                // space instead of piling at the low end -- which is what lets shards slice evenly.
+                let key = mask_coremer::<C>(cmer.0);
+                keys.get_kmer_cell_mut_ref(key).increment();
             }
         }
     }
@@ -267,14 +264,17 @@ fn default_build_map<
 
                 total_minimizers += 1;
 
-                // if cmer.is_own_rc() { 
+                // if cmer.is_own_rc() {
                 //     own_rc_count += 1;
-                //     continue 
+                //     continue
                 // };
 
                 let flanks = kmer.flanks::<F>();
-        
-                match flexmap.keys.vrange(cmer.0) {
+
+                // Same key mix as the keys pass -- must be identical so values land in the slots
+                // counted there.
+                let key = mask_coremer::<C>(cmer.0);
+                match flexmap.keys.vrange(key) {
                     Some(range) => {
                         let mut vblock = flexmap.values.get_range_mut(range);
                         vblock.insert(VD::set(reference_id as u64, pos as u64), flanks.0 as u32);

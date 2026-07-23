@@ -240,18 +240,54 @@ FlexmapHash<C, F, HEADER_THRESHOLD>
     }
 }
 
+/// Where a [`FlexmapBlob`]'s bytes live: either read fully into a heap buffer, or a lazy
+/// memory-map of the blob file (the OS pages in only the regions actually touched). Both keep the
+/// backing bytes at a stable address for the struct's lifetime, so the raw pointers stay valid.
+enum BlobBacking {
+    Owned(Vec<u64>),
+    Mapped(memmap2::Mmap),
+}
+
+impl BlobBacking {
+    #[inline]
+    fn base_ptr(&self) -> *const u8 {
+        match self {
+            BlobBacking::Owned(v) => v.as_ptr() as *const u8,
+            BlobBacking::Mapped(m) => m.as_ptr(),
+        }
+    }
+}
+
 pub struct FlexmapBlob<
     const C: usize,
     const F: usize,
     const CELLS_PER_BODY: u64,
     const HEADER_THRESHOLD: usize,
 > {
-    storage: Vec<u64>,
+    // `Arc` so the blob is cheaply cloneable (the pipeline clones its database wrapper per worker):
+    // clones share one backing, keeping the raw pointers valid.
+    backing: std::sync::Arc<BlobBacking>,
     file_size: usize,
     keys_ptr: *const KCell,
     keys_len: usize,
     values_ptr: *const VCell,
     values_len: usize,
+}
+
+impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize> Clone
+    for FlexmapBlob<C, F, CELLS_PER_BODY, HEADER_THRESHOLD>
+{
+    fn clone(&self) -> Self {
+        // Shares the backing; the pointers remain valid views into it.
+        Self {
+            backing: std::sync::Arc::clone(&self.backing),
+            file_size: self.file_size,
+            keys_ptr: self.keys_ptr,
+            keys_len: self.keys_len,
+            values_ptr: self.values_ptr,
+            values_len: self.values_len,
+        }
+    }
 }
 
 // `Send`/`Sync` cannot be derived for this type because it stores raw pointers.
@@ -358,12 +394,58 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
             .expect("invalid values section");
 
         Self {
-            storage,
+            backing: std::sync::Arc::new(BlobBacking::Owned(storage)),
             file_size,
             keys_ptr: keys_slice.as_ptr(),
             keys_len,
             values_ptr: values_slice.as_ptr(),
             values_len,
+        }
+    }
+
+    /// Like [`load_from_file`](Self::load_from_file) but memory-maps the blob instead of reading it
+    /// into the heap. The OS pages in only the keys/values actually touched during lookups, so open
+    /// is near-instant and untouched regions of a multi-GB index are never read. `keys_offset`/
+    /// `values_offset` are 64-byte aligned in the file and the map base is page-aligned, so the
+    /// control-head `u64` reads stay aligned.
+    pub fn mmap_from_file(filename: &String) -> Self {
+        let file = File::open(filename).expect("no file found");
+        let mmap = unsafe { memmap2::Mmap::map(&file).expect("mmap failed") };
+        let file_size = mmap.len();
+
+        let header_size = FLEXMAP_BLOB_HEADER_SIZE;
+        assert!(file_size >= header_size, "file too small for header");
+        let header = decode_header(&mmap[..header_size]);
+
+        assert!(header.magic == FLEXMAP_BLOB_MAGIC, "invalid blob magic");
+        assert!(header.version == FLEXMAP_BLOB_VERSION, "unsupported blob version");
+        assert!(header.c as usize == C, "blob C mismatch");
+        assert!(header.f as usize == F, "blob F mismatch");
+        assert!(header.cells_per_body == CELLS_PER_BODY, "blob cells_per_body mismatch");
+        assert!(header.header_threshold as usize == HEADER_THRESHOLD, "blob header_threshold mismatch");
+
+        let keys_offset = header.keys_offset as usize;
+        let keys_len = header.keys_len as usize;
+        let keys_end = keys_offset + keys_len * mem::size_of::<KCell>();
+        let values_offset = header.values_offset as usize;
+        let values_len = header.values_len as usize;
+        let values_end = values_offset + values_len * mem::size_of::<VCell>();
+
+        assert!(keys_end <= file_size, "keys out of file bounds");
+        assert!(values_end <= file_size, "values out of file bounds");
+
+        let keys_slice: &[KCell] =
+            bytemuck::try_cast_slice(&mmap[keys_offset..keys_end]).expect("invalid keys section");
+        let values_slice: &[VCell] = bytemuck::try_cast_slice(&mmap[values_offset..values_end])
+            .expect("invalid values section");
+
+        Self {
+            keys_ptr: keys_slice.as_ptr(),
+            keys_len,
+            values_ptr: values_slice.as_ptr(),
+            values_len,
+            file_size,
+            backing: std::sync::Arc::new(BlobBacking::Mapped(mmap)),
         }
     }
 
@@ -380,7 +462,7 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
     }
 
     pub fn backing_bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.storage.as_ptr() as *const u8, self.file_size) }
+        unsafe { slice::from_raw_parts(self.backing.base_ptr(), self.file_size) }
     }
 
     #[inline(always)]

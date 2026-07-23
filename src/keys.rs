@@ -146,7 +146,7 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
     }
 
     // #[inline(always)]
-    fn get_control_header_value(&self, index: usize) -> u64 {
+    pub fn get_control_header_value(&self, index: usize) -> u64 {
         unsafe {
             *self.data.as_ptr().add(index).cast::<u64>()
         }

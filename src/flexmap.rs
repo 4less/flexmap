@@ -20,6 +20,11 @@ pub trait VRangeGetter {
     fn get_vrange(&self, canonical_kmer: u64) -> Option<VRange>;
 }
 
+/// Default key-block prefetch distance for [`FlexmapBlob::for_each_vrange_prefetched`] (how many
+/// iterations ahead the rolling single-pass loop issues the prefetch). Empirically best around
+/// 16-24 on a C=15 out-of-cache workload; see `docs/prefetch-pipeline.md`.
+const PREFETCH_DISTANCE: usize = 24;
+
 const FLEXMAP_BLOB_MAGIC: [u8; 8] = *b"FMBLOB01";
 const FLEXMAP_BLOB_VERSION: u32 = 1;
 const FLEXMAP_BLOB_ALIGN: usize = 64;
@@ -471,6 +476,59 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
             VRange::new(None, positions)
         }
     }
+
+    /// Prefetch the cache line at `base + byte_offset` into L1 (`T0`). A no-op hint: it never
+    /// changes results, only latency. Non-x86 targets ignore it.
+    #[inline(always)]
+    fn prefetch_t0(base: *const u8, byte_offset: usize) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(base.add(byte_offset) as *const i8, _MM_HINT_T0);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (base, byte_offset);
+        }
+    }
+
+    /// Prefetching batch scan. Keeps the key-table miss of upcoming queries in flight so it
+    /// overlaps the work of the current one; identical results to a `get_vrange` loop, just faster
+    /// on out-of-cache workloads (~1.5x vs the scalar blob on a C=15 dataset). Uses the rolling
+    /// single-pass strategy, which beat the 3-phase group pipeline in benchmarks.
+    #[inline]
+    pub fn for_each_vrange_prefetched<Fun>(&self, queries: &[u64], f: Fun)
+    where
+        Fun: FnMut(u64, Option<VRange>),
+    {
+        self.for_each_vrange_prefetched_rolling(queries, PREFETCH_DISTANCE, f)
+    }
+
+    /// Single-pass rolling prefetch: software-prefetch the *key* control-block `distance` iterations
+    /// ahead, then do the normal scalar lookup. Targets the dominant miss (the key table) and lets
+    /// the value-side miss ride on the hardware prefetcher / out-of-order engine. This lean form
+    /// beat a heavier 3-phase group pipeline in benchmarks (~1.5x vs scalar blob at `distance` 16-24
+    /// on a C=15 out-of-cache dataset); see `docs/prefetch-pipeline.md`.
+    #[inline]
+    pub fn for_each_vrange_prefetched_rolling<Fun>(&self, queries: &[u64], distance: usize, mut f: Fun)
+    where
+        Fun: FnMut(u64, Option<VRange>),
+    {
+        let key_stride = mem::size_of::<KCell>();
+        let keys_base = self.keys_ptr as *const u8;
+        let d = distance.max(1);
+        let n = queries.len();
+
+        for i in 0..n {
+            if i + d < n {
+                let bi = Self::kmer_to_ctrl_block_index(queries[i + d]);
+                Self::prefetch_t0(keys_base, bi * key_stride);
+            }
+            let q = queries[i];
+            let vr = self.vrange_from_keys(q).map(|r| self.get_range_from_values(r));
+            f(q, vr);
+        }
+    }
 }
 
 impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THRESHOLD: usize>
@@ -578,6 +636,35 @@ mod tests {
         }
 
         fs::remove_file(&filename).expect("failed to cleanup mmap test file");
+    }
+
+    /// The prefetching batch scan must return exactly the same ranges, in the same order, as the
+    /// scalar `get_vrange` loop -- prefetch is a latency hint only, never a semantic change.
+    #[test]
+    fn flexmap_blob_prefetched_matches_scalar() {
+        let flexmap = build_flexmap();
+        let filename = temp_blob_path("prefetch_compare");
+        flexmap.save_blob(&filename);
+        let blob = Flexmap::<3, 8, 8, 2>::load_blob(&filename);
+        fs::remove_file(&filename).expect("failed to cleanup prefetch test file");
+
+        // Cover every core-mer key plus a scattered pseudo-random stream (repeats, misses, order).
+        let ckmer_space = 1u64 << (3 * 2);
+        let mut queries: Vec<u64> = (0..ckmer_space).collect();
+        queries.extend(build_query_keys(4096));
+
+        let mut got = Vec::with_capacity(queries.len());
+        blob.for_each_vrange_prefetched(&queries, |k, vr| {
+            got.push((k, vr.map(|v| v.positions.len())));
+        });
+
+        assert_eq!(got.len(), queries.len(), "prefetched scan dropped or added queries");
+        for (idx, &q) in queries.iter().enumerate() {
+            let (emitted_key, emitted_len) = got[idx];
+            assert_eq!(emitted_key, q, "prefetched scan reordered queries at {idx}");
+            let expected = blob.get_vrange(q).map(|v| v.positions.len());
+            assert_eq!(emitted_len, expected, "prefetched result differs at query {q}");
+        }
     }
 
     /// A cloned blob shares the same backing (Arc) and must answer queries identically to the

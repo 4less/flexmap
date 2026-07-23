@@ -267,6 +267,7 @@ fn run_bench_access_c15f16(args: &[String]) {
 
     let mut regular_total = 0f64;
     let mut blob_total = 0f64;
+    let mut prefetch_total = 0f64;
     for _ in 0..rounds {
         let start = Instant::now();
         let n = scan_all(&regular, &queries);
@@ -277,15 +278,49 @@ fn run_bench_access_c15f16(args: &[String]) {
         let n = scan_all(&blob, &queries);
         blob_total += start.elapsed().as_secs_f64();
         assert!(n > 0 || query_count == 0);
+
+        let start = Instant::now();
+        let n = scan_all_prefetched(&blob, &queries);
+        prefetch_total += start.elapsed().as_secs_f64();
+        assert!(n > 0 || query_count == 0);
     }
 
     let regular_avg = regular_total / rounds as f64;
     let blob_avg = blob_total / rounds as f64;
+    let prefetch_avg = prefetch_total / rounds as f64;
+    let mqs = |avg: f64| (query_count as f64 / avg) / 1e6;
     println!("Access benchmark C15/F16:");
     println!("  query_count: {query_count}");
     println!("  rounds:      {rounds}");
-    println!("  regular avg: {:.6} s/round ({:.2} Mq/s)", regular_avg, (query_count as f64 / regular_avg) / 1e6);
-    println!("  blob avg:    {:.6} s/round ({:.2} Mq/s)", blob_avg, (query_count as f64 / blob_avg) / 1e6);
+    println!("  regular avg:       {:.6} s/round ({:.2} Mq/s)", regular_avg, mqs(regular_avg));
+    println!("  blob avg:          {:.6} s/round ({:.2} Mq/s)", blob_avg, mqs(blob_avg));
+    println!("  blob+prefetch avg: {:.6} s/round ({:.2} Mq/s)", prefetch_avg, mqs(prefetch_avg));
+    println!("  prefetch speedup vs blob:    {:.2}x", blob_avg / prefetch_avg);
+    println!("  prefetch speedup vs regular: {:.2}x", regular_avg / prefetch_avg);
+}
+
+fn scan_all_prefetched<const C: usize, const F: usize, const CPB: u64, const HT: usize>(
+    blob: &flexmap::flexmap::FlexmapBlob<C, F, CPB, HT>,
+    queries: &[u64],
+) -> usize {
+    // FLEXMAP_PREFETCH_G overrides the rolling prefetch distance (default 24).
+    // FLEXMAP_PREFETCH_BATCH chunks the query stream into calls of that many keys (0 = one call).
+    let distance = env::var("FLEXMAP_PREFETCH_G").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(24);
+    let batch = env::var("FLEXMAP_PREFETCH_BATCH").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    let mut total = 0usize;
+    let mut acc = |_q: u64, vr: Option<flexmap::values::VRange>| {
+        if let Some(v) = vr {
+            total = total.wrapping_add(v.positions.len());
+        }
+    };
+    if batch == 0 {
+        blob.for_each_vrange_prefetched_rolling(queries, distance, &mut acc);
+    } else {
+        for chunk in queries.chunks(batch) {
+            blob.for_each_vrange_prefetched_rolling(chunk, distance, &mut acc);
+        }
+    }
+    total
 }
 
 fn scan_all<T: flexmap::flexmap::VRangeGetter>(map: &T, queries: &[u64]) -> usize {

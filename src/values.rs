@@ -29,14 +29,21 @@ fn coremer_bit_dist(xored: u32) -> u32 {
 /// Minimum flank distance from `flex` to any header in `headers`, and how many headers attain it.
 /// Returns `(u32::MAX, 0)` for an empty slice. Semantically identical to the scalar loop in
 /// [`VRange::best_flex_match`]; dispatches to the widest SIMD the CPU supports at runtime.
+/// Below this many headers, the AVX-512 path's fixed cost (setup + horizontal lane-combine)
+/// outweighs its throughput and it loses to the auto-vectorized scalar loop; the crossover is
+/// ~128 on Zen 5 (see `docs/simd-flex-match.md`). Small header blocks are the common case, so we
+/// stay scalar below the threshold.
+const SIMD_MIN_HEADERS: usize = 128;
+
 pub fn min_dist_and_count(headers: &[HeaderSeq], flex: u32) -> (u32, u32) {
-    // Only AVX-512 (with VPOPCNTDQ) beats the auto-vectorized scalar loop here (~1.65x on large
-    // header blocks). The hand-written AVX2 path relies on a pshufb popcount and benchmarks *below*
-    // the compiler's scalar auto-vectorization, so it is deliberately not on the dispatch path
-    // (kept public only for benchmarking).
+    // Only AVX-512 (with VPOPCNTDQ), and only on large-enough blocks, beats the auto-vectorized
+    // scalar loop (~1.5x at 512+ headers). The hand-written AVX2 path relies on a pshufb popcount
+    // and benchmarks *below* the compiler's scalar auto-vectorization, so it is deliberately not on
+    // the dispatch path (kept public only for benchmarking).
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f")
+        if headers.len() >= SIMD_MIN_HEADERS
+            && is_x86_feature_detected!("avx512f")
             && is_x86_feature_detected!("avx512bw")
             && is_x86_feature_detected!("avx512vpopcntdq")
         {

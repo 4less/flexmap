@@ -26,7 +26,10 @@ pub trait VRangeGetter {
 const PREFETCH_DISTANCE: usize = 24;
 
 const FLEXMAP_BLOB_MAGIC: [u8; 8] = *b"FMBLOB01";
-const FLEXMAP_BLOB_VERSION: u32 = 1;
+// Bump whenever the on-disk key/value layout OR the key-construction scheme changes, so a stale
+// blob is rejected rather than silently misread. v2: keys are `mask_coremer`-mixed (commit that
+// spread direct-addressed keys uniformly); a v1 blob's raw keys no longer match the current lookup.
+const FLEXMAP_BLOB_VERSION: u32 = 2;
 const FLEXMAP_BLOB_ALIGN: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -301,6 +304,26 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
         }
 
         file.write_all(values_bytes).expect("write failed");
+    }
+
+    /// Cheap, non-panicking compatibility check: reads only the header and reports whether this blob
+    /// file can be loaded by the current code with these const params. Returns `false` on any I/O
+    /// error, bad magic, wrong version, or a param mismatch -- so a caller can fall back to rebuilding
+    /// the index instead of `load_from_file`/`mmap_from_file` asserting (panicking) or, worse, an
+    /// older-format blob being silently misread. See [`FLEXMAP_BLOB_VERSION`].
+    pub fn is_compatible(filename: &String) -> bool {
+        let Ok(mut file) = File::open(filename) else { return false };
+        let mut buf = [0u8; FLEXMAP_BLOB_HEADER_SIZE];
+        if file.read_exact(&mut buf).is_err() {
+            return false;
+        }
+        let header = decode_header(&buf);
+        header.magic == FLEXMAP_BLOB_MAGIC
+            && header.version == FLEXMAP_BLOB_VERSION
+            && header.c as usize == C
+            && header.f as usize == F
+            && header.cells_per_body == CELLS_PER_BODY
+            && header.header_threshold as usize == HEADER_THRESHOLD
     }
 
     pub fn load_from_file(filename: &String) -> Self {

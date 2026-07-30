@@ -10,8 +10,13 @@ channel = "nightly"
 
 [dependencies]
 colored = "2.1.0"
-kmerrs = { git = "https://github.com/4less/kmerr.git" }
-bioreader = { git = "https://github.com/4less/bioreader.git" }
+# Pinned to the SAME revs flexalign pins. Unpinned, cargo resolves this to a different kmerrs
+# than the parent does, so the dependency graph carries two copies -- and flexmap gets compiled
+# against whichever one lacks the symbols it needs (`mask_coremer`), which breaks any build that
+# does not have a local `paths` override collapsing them. That override exists only on a
+# developer machine, so the failure appears the moment anyone else builds.
+kmerrs = { git = "https://github.com/4less/kmerr.git", rev = "3b86438d083ba83d334ba19a5f5a45ad045f247d" }
+bioreader = { git = "https://github.com/4less/bioreader.git", rev = "1ba00bb9055ec71334c87576e12023f994dd1390" }
 savefile = { version="0.17", feature="derive" }
 savefile-derive = "0.17"
 ser_raw = "0.1.0"

@@ -408,6 +408,42 @@ impl PackedValues {
     }
 }
 
+impl PackedValues {
+    /// The values of the keys `each_key` lists as (source first cell, cells), read from `src` and
+    /// written one after the other from cell 0, in `src`'s layout. A key's cells start at a different
+    /// bit than in `src`, so its flank cells and values are re-encoded, not copied.
+    fn from_packed(src: &PackedValues, total_slots: u64, each_key: &dyn Fn(&mut dyn FnMut(u64, u64))) -> Self {
+        let layout = src.layout;
+        let bytes = ((layout.slot_bit(total_slots) + 7) >> 3) as usize + VALUE_PADDING;
+        let mut words = zeroed_words((bytes + 7) / 8);
+        let w = layout.entry_bits();
+        let mut start = 0u64;
+        each_key(&mut |src_start, slots| {
+            let range = src.range(src_start, slots);
+            let n = range.len() as u64;
+            let bit = layout.slot_bit(start);
+            let entry_bit = if range.has_header() {
+                let flex_byte = (bit + 7) >> 3;
+                for (i, c) in range.flex_bytes().chunks_exact(4).enumerate() {
+                    let flank = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    put_bits(&mut words, (flex_byte + 4 * i as u64) * 8, flank as u64, 32);
+                }
+                (flex_byte + 4 * n) * 8
+            } else {
+                bit
+            };
+            for i in 0..n {
+                let (val, pos) = range.get(i as usize);
+                put_bits(&mut words, entry_bit + i * w as u64, (val << layout.pos_bits) | pos, w);
+            }
+            debug_assert!(entry_bit + n * w as u64 <= layout.slot_bit(start + slots));
+            start += slots;
+        });
+        assert_eq!(start, total_slots, "cells of the listed keys");
+        Self { layout, total_slots, data: Section::from_words(words, bytes) }
+    }
+}
+
 /// Where a key's cells are: `locate` gives (first cell, number of cells) for a key with values.
 pub trait SlotLocator: Send + Sync + Sized {
     /// Stored in the file.
@@ -423,6 +459,14 @@ pub trait SlotLocator: Send + Sync + Sized {
     fn sections(&self) -> Vec<Section>;
     fn params(&self) -> [u64; 4];
     fn from_sections(sections: &[Section], params: [u64; 4]) -> Self;
+    /// Calls `f(key, first cell, cells)` for every key in `[lo, hi)` with values, in key order.
+    fn for_each_in(&self, lo: u64, hi: u64, f: &mut dyn FnMut(u64, u64, u64)) {
+        for key in lo..hi {
+            if let Some((start, slots)) = self.locate(key) {
+                f(key, start, slots);
+            }
+        }
+    }
 }
 
 /// Flexmap's direct key table: a 16-bit offset for every key, a 64-bit head per CPB keys.
@@ -659,6 +703,32 @@ impl SlotLocator for CompactKeys {
         assert_eq!(sections[1].len() as u64, (used + 1 + Self::GROUP - 1) / Self::GROUP * 8, "bases");
         assert_eq!(sections[2].len() as u64, 3 * (used + 1) + 8, "offsets");
         Self { keys, used, lines: sections[0].clone(), bases: sections[1].clone(), offsets: sections[2].clone() }
+    }
+
+    fn for_each_in(&self, lo: u64, hi: u64, f: &mut dyn FnMut(u64, u64, u64)) {
+        let hi = hi.min(self.keys);
+        if lo >= hi {
+            return;
+        }
+        let first = lo / Self::KEYS_PER_LINE;
+        let last = (hi - 1) / Self::KEYS_PER_LINE;
+        for line in first..=last {
+            let p = unsafe { (self.lines.ptr() as *const u64).add(line as usize * 8) };
+            let mut rank = unsafe { *p.add(7) };
+            for w in 0..7u64 {
+                let mut bits = unsafe { *p.add(w as usize) };
+                while bits != 0 {
+                    let b = bits.trailing_zeros() as u64;
+                    bits &= bits - 1;
+                    let key = line * Self::KEYS_PER_LINE + w * 64 + b;
+                    if key >= lo && key < hi {
+                        let start = self.start(rank);
+                        f(key, start, self.start(rank + 1) - start);
+                    }
+                    rank += 1;
+                }
+            }
+        }
     }
 }
 
@@ -957,6 +1027,37 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         self.for_each_prefetched_with(queries, 8, f)
     }
 
+    /// Calls `f(key, first cell, cells)` for every key in `[lo, hi)` with values, in key order.
+    pub fn for_each_key_in(&self, lo: u64, hi: u64, f: &mut dyn FnMut(u64, u64, u64)) {
+        self.keys.for_each_in(lo, hi, f)
+    }
+
+    /// The keys `[lo, hi)` alone, as keys `0..hi - lo`, with a compact key table and only their
+    /// values: `slice(lo, hi).get(k - lo)` answers as `get(k)` for every `k` in `[lo, hi)` (and must
+    /// not be asked for keys outside `0..hi - lo`, as no table may be asked past its keys). The values
+    /// keep this index's widths, so slices of one index can be read alike. Reads only the keys and
+    /// values of the range; the result owns its memory.
+    pub fn slice(&self, lo: u64, hi: u64) -> PackedFlexmap<CompactKeys, C, F, T> {
+        assert!(lo <= hi, "key range {lo}..{hi}");
+        let (mut used, mut total_slots) = (0u64, 0u64);
+        self.keys.for_each_in(lo, hi, &mut |_, _, slots| {
+            used += 1;
+            total_slots += slots;
+        });
+        let each_key = |f: &mut dyn FnMut(u64, u64, u64)| {
+            let mut start = 0u64;
+            self.keys.for_each_in(lo, hi, &mut |key, _, slots| {
+                f(key - lo, start, slots);
+                start += slots;
+            });
+        };
+        let keys = CompactKeys::build(hi - lo, used, &each_key);
+        let values = PackedValues::from_packed(&self.values, total_slots, &|f: &mut dyn FnMut(u64, u64)| {
+            self.keys.for_each_in(lo, hi, &mut |_, start, slots| f(start, slots));
+        });
+        PackedFlexmap { keys, values }
+    }
+
     /// Bytes of the key table and of the values.
     pub fn memory_bytes(&self) -> (usize, usize) {
         (self.keys.memory_bytes(), self.values.memory_bytes())
@@ -1146,6 +1247,45 @@ mod tests {
             assert_eq!(hashed.keys.locate(key), compact.keys.locate(key), "key {key}");
         }
         assert!(compact.values.memory_bytes() < flexmap.values.data.len() * 8);
+    }
+
+    #[test]
+    fn slices_answer_as_the_whole_index() {
+        let flexmap = random_flexmap();
+        let compact = PackedFlexmap::<CompactKeys, 6, 8, 2>::from_flexmap(&flexmap);
+        let hashed = PackedFlexmap::<HashedKeys, 6, 8, 2>::from_compact(&compact).expect("hashed table fits");
+        let keys = 1u64 << 12;
+        // Bounds that are not multiples of a line (448) or of anything else.
+        let bounds = [0u64, 1, 447, 1000, 1001, 2900, keys];
+        let mut total = 0u64;
+        for w in bounds.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            for slice in [compact.slice(lo, hi), hashed.slice(lo, hi)] {
+                assert_eq!(slice.values.layout, compact.values.layout);
+                for key in lo..hi {
+                    match (compact.get(key), slice.get(key - lo)) {
+                        (None, None) => {}
+                        (Some(a), Some(b)) => {
+                            assert_eq!((a.len(), a.has_header()), (b.len(), b.has_header()), "key {key}");
+                            assert_eq!(a.flex_bytes(), b.flex_bytes(), "key {key}: flank cells");
+                            for i in 0..a.len() {
+                                assert_eq!(a.get(i), b.get(i), "key {key}: value {i}");
+                            }
+                        }
+                        (a, b) => panic!("key {key}: whole {} slice {}", a.is_some(), b.is_some()),
+                    }
+                }
+            }
+            let mut walked = Vec::new();
+            hashed.for_each_key_in(lo, hi, &mut |k, s, n| walked.push((k, s, n)));
+            let mut expect = Vec::new();
+            compact.for_each_key_in(lo, hi, &mut |k, s, n| expect.push((k, s, n)));
+            assert_eq!(walked, expect, "keys of {lo}..{hi}");
+            total += compact.slice(lo, hi).values.total_slots();
+        }
+        assert_eq!(total, compact.values.total_slots(), "the slices partition the cells");
+        let empty = compact.slice(5, 5);
+        assert_eq!((empty.keys.used(), empty.values.total_slots()), (0, 0));
     }
 
     #[test]

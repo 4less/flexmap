@@ -1,0 +1,5 @@
+build	$SCRATCH/data/d3_human_chr1-8.fa	refs	7	used_keys	50434242	cells	384443312	build_s	196.6	peak_rss_gb	7.08
+old	keys_gb	2.684	values_gb	3.076	total_gb	5.760
+old	save_s	1.7
+compact	keys_gb	0.311	values_gb	2.075	total_gb	2.386	ref_bits	3	pos_bits	28	bits_per_cell	43.19	convert_s	14.4
+hashed	keys_gb	0.538	values_gb	2.075	total_gb	2.613	ref_bits	3	pos_bits	28	bits_per_cell	43.19	convert_s	0.6

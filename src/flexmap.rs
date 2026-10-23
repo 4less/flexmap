@@ -330,7 +330,7 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
         let mut file = File::open(filename).expect("no file found");
         let file_size = file.metadata().expect("metadata failed").len() as usize;
         let words = (file_size + mem::size_of::<u64>() - 1) / mem::size_of::<u64>();
-        let mut storage = vec![0u64; words];
+        let mut storage = crate::memory::zeroed_words(words);
 
         let bytes = unsafe { slice::from_raw_parts_mut(storage.as_mut_ptr() as *mut u8, file_size) };
         file.read_exact(bytes).expect("read failed");

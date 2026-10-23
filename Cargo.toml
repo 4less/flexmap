@@ -26,8 +26,9 @@ bincode = { version = "2.0.0-rc.3" }
 fxhash = "0.2.1"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 memmap2 = "0.9"
+libc = "0.2"
 
 [profile.release]
 opt-level = 3               # Use best optimizations
 overflow-checks = false     # Disable integer overflow checks.
-rustflags = ["-C", "target-feature=+avx,+sse3,+avx2,+fma"]#
+rustflags = ["-C", "target-feature=+avx,+sse3,+avx2,+fma,+popcnt,+bmi1,+bmi2,+lzcnt"]#

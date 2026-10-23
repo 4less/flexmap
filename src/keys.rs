@@ -40,8 +40,10 @@ use kmerrs::consecutive::kmer::Kmer;
 pub struct KCell(pub u16);
 
 impl KCell {
+    /// Counts one more occurrence. Saturates at u16::MAX (it wrapped to 0 before, so a key seen
+    /// 65,536 times was counted as seen 0 times); such a key is over any range limit and left out.
     pub fn increment(&mut self) {
-        self.0 += 1;
+        self.0 = self.0.saturating_add(1);
     }
 
     pub fn set(&mut self, value: u16) {
@@ -150,7 +152,7 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
 
     pub fn new() -> FMKeys<C, CELLS_PER_BODY> {
         FMKeys {
-            data: vec![KCell(0); Self::table_size().try_into().unwrap()],
+            data: crate::memory::zeroed_vec(Self::table_size().try_into().unwrap()),
         }
     }
 
@@ -209,7 +211,11 @@ impl<const C: usize, const CELLS_PER_BODY: u64>
             let mut ckmer_count = self.get_kmer_cell(ckmer).0 as u64;
 
             if ckmer_count > 0 { set_keys += 1 };
-            if ckmer_count as usize > max_range_size || ckmer_count as usize > Self::MAX_KEY_VALUESSIZE {
+            let key_cells = ckmer_count + (((ckmer_count > HEADER_THRESHOLD as u64) as u64) * (Self::calc_header_size(ckmer_count as usize) as u64));
+            // A key's offset in its block is 16 bits: a key whose cells would end past u16::MAX is
+            // left out like a key over the range limit (the offsets wrapped around before).
+            if ckmer_count as usize > max_range_size || ckmer_count as usize > Self::MAX_KEY_VALUESSIZE
+                || block_vindex + key_cells > u16::MAX as u64 {
                 // eprintln!("{} {}  (user_max_range: {} , data_structure_max_range {})", kmer.to_string().unwrap(), ckmer_count, max_range_size, Self::MAX_KEY_VALUESSIZE);
                 skip += 1;
                 ckmer_count = 0;

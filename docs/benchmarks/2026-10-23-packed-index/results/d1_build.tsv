@@ -1,0 +1,6 @@
+build	$SCRATCH/data/d1_diverse.fa	refs	66010	used_keys	50314663	cells	611353670	build_s	289.7	peak_rss_gb	7.63
+old	keys_gb	2.684	values_gb	4.891	total_gb	7.575
+old	save_s	2.3
+compact	keys_gb	0.311	values_gb	3.809	total_gb	4.120	ref_bits	17	pos_bits	24	bits_per_cell	49.84	convert_s	17.3
+hashed	keys_gb	0.537	values_gb	3.809	total_gb	4.346	ref_bits	17	pos_bits	24	bits_per_cell	49.84	convert_s	48.5
+hashed	keys_gb	0.537	values_gb	3.809	total_gb	4.346	ref_bits	17	pos_bits	24	bits_per_cell	49.84	convert_s	0.5

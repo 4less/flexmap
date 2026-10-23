@@ -1,0 +1,409 @@
+<title>Packed Flexmap Benchmark</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+:root{--bg:#f6f7f4;--surface:#ffffff;--fg:#15181a;--muted:#5a6066;--line:#dcdfd9;--old:#eb6834;--new:#2a78d6;--hash:#1baf7a;--good:#0b7a35;--bad:#b4232c;
+--sans:"IBM Plex Sans",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace;--display:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#131514;--surface:#1b1e1c;--fg:#eceeea;--muted:#a3aaa4;--line:#313632;--old:#d95926;--new:#3987e5;--hash:#199e70;--good:#3fbf6a;--bad:#ef6b6b;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#131514;--surface:#1b1e1c;--fg:#eceeea;--muted:#a3aaa4;--line:#313632;--old:#d95926;--new:#3987e5;--hash:#199e70;--good:#3fbf6a;--bad:#ef6b6b;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 var(--sans);margin:0}
+.wrap{max-width:1100px;margin:0 auto;padding-block:28px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1{font:600 30px/1.15 var(--display);margin:0 0 6px;text-wrap:balance} h2{font:600 21px/1.25 var(--display);margin:40px 0 6px;text-wrap:balance} h3{font:600 15px/1.3 var(--sans);margin:22px 0 6px}
+p{max-width:76ch;margin:6px 0} .lede{color:var(--muted);font-size:15.5px} .muted{color:var(--muted)} .mono,td.num,th.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:14px 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+.tile .k{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)} .tile .v{font:600 27px/1.15 var(--display);margin:4px 0} .tile .s{font-size:13px;color:var(--muted)}
+.scroll{overflow-x:auto;margin:8px 0 4px} table{border-collapse:collapse;font-size:13px;width:100%;background:var(--surface)}
+th,td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap} th{font-weight:600;font-size:11.5px;color:var(--muted);letter-spacing:.03em;vertical-align:bottom}
+td.num,th.num{text-align:right} tr.base td{font-weight:600}
+.up{color:var(--good)} .down{color:var(--bad)} .ok{color:var(--good);font-weight:600} .fail{color:var(--bad);font-weight:600}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin:4px 0}.sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+svg text{fill:var(--fg);font-family:var(--sans)} svg .axis{stroke:var(--line)} ul{max-width:80ch;padding-left:20px} li{margin:4px 0}
+</style><div class="wrap">
+<h1>Packed Flexmap Benchmark</h1><p class="lede">flexmap branch <span class="mono">packed-index</span> against <span class="mono">origin/zeroable_load</span> (cebfd56, the rev flexalign pins). The packed index holds the same k-mer positions and flank cells in less memory and answers every lookup with the same seeds. Quick runs: 2 M queries per dataset and scenario, one timed round after a warm-up.</p>
+<h2>At a glance</h2><p class="muted">Short reads, one lookup call per 150 bp read, M seed lookups per second, both sides with their batch prefetch. Memory is the whole index in RAM.</p>
+<div class="scroll"><table><tr><th>Dataset</th><th class="num">Old index</th><th class="num">Packed compact</th><th class="num">Packed hashed</th>
+<th class="num">Old 1t</th><th class="num">Compact 1t</th><th class="num">Hashed 1t</th>
+<th class="num">Old 8t</th><th class="num">Compact 8t</th><th class="num">Hashed 8t</th>
+<th>Same answers</th></tr>
+<tr><td>D1 · 450 mixed bacterial genomes</td><td class="num">7.58 GB</td><td class="num">4.12 GB <span class="up">−46%</span></td><td class="num">4.35 GB <span class="up">−43%</span></td>
+<td class="num">1.57</td>
+<td class="num">3.18 <span class="up">2.03×</span></td>
+<td class="num">3.37 <span class="up">2.15×</span></td>
+<td class="num">9.39</td>
+<td class="num">16.46 <span class="up">1.75×</span></td>
+<td class="num">18.04 <span class="up">1.92×</span></td>
+<td><span class=ok>yes</span></td></tr>
+<tr><td>D2 · 300 Bacteroides uniformis genomes</td><td class="num">5.74 GB</td><td class="num">2.50 GB <span class="up">−56%</span></td><td class="num">–</td>
+<td class="num">0.84</td>
+<td class="num">1.14 <span class="up">1.36×</span></td>
+<td class="num">–</td>
+<td class="num">4.36</td>
+<td class="num">5.61 <span class="up">1.29×</span></td>
+<td class="num">–</td>
+<td><span class=ok>yes</span></td></tr>
+<tr><td>D3 · human GRCh37 chr1–8</td><td class="num">5.76 GB</td><td class="num">2.39 GB <span class="up">−59%</span></td><td class="num">2.61 GB <span class="up">−55%</span></td>
+<td class="num">1.88</td>
+<td class="num">3.37 <span class="up">1.79×</span></td>
+<td class="num">3.51 <span class="up">1.87×</span></td>
+<td class="num">11.15</td>
+<td class="num">18.59 <span class="up">1.67×</span></td>
+<td class="num">18.36 <span class="up">1.65×</span></td>
+<td><span class=ok>yes</span></td></tr>
+</table></div>
+<h2>D1 · 450 mixed bacterial genomes</h2><p class="muted">2.05 Gbp in 66,010 contigs: many species, few copies of a k-mer</p>
+<div class="tiles"><div class="tile"><div class="k">Index memory (GB)</div><div class="v">7.58 → 4.12 → 4.35</div><div class="s">old: keys 2.68 + values 4.89; compact: keys 0.31 + values 3.81; hashed: keys 0.54 + values 3.81; 49.8 bits a value cell, not 64. 4.7% of the 4<sup>15</sup> keys are used.</div></div><div class="tile"><div class="k">Short reads (150 bp), 1 thread</div><div class="v">2.15× faster</div><div class="s">1.57 → 3.37 M seed lookups/s (hashed keys)</div></div><div class="tile"><div class="k">Long reads (10 kb), 1 thread</div><div class="v">1.65× faster</div><div class="s">2.28 → 3.76 M seed lookups/s (hashed keys)</div></div><div class="tile"><div class="k">Same answers</div><div class="v">yes</div><div class="s">the hash of every emitted (position, reference, distance, ties) per query agrees across all variants</div></div></div>
+<h3>Lookups per second (prefetch on)</h3><div class="legend"><span><span class="sw" style="background:var(--old)"></span>Flexmap blob (flexalign today)</span><span><span class="sw" style="background:var(--new)"></span>Packed, compact keys</span><span><span class="sw" style="background:var(--hash)"></span>Packed, hashed keys</span></div>
+<div class="scroll"><svg viewBox="0 0 860 376" width="100%" style="max-width:860px;min-width:560px" role="img" aria-label="Lookups per second by variant"><text x="180" y="31.5" text-anchor="end" font-size="12.5">150 bp per read · 1 thr</text><rect x="190" y="6" width="45.2" height="13" rx="3" fill="var(--old)"><title>1.57 M queries/s</title></rect><text x="241.2" y="17" font-size="11.5" class="mono">1.57</text><rect x="190" y="21" width="91.6" height="13" rx="3" fill="var(--new)"><title>3.18 M queries/s</title></rect><text x="287.6" y="32" font-size="11.5" class="mono">3.18  2.03×</text><rect x="190" y="36" width="97.1" height="13" rx="3" fill="var(--hash)"><title>3.37 M queries/s</title></rect><text x="293.1" y="47" font-size="11.5" class="mono">3.37  2.15×</text><text x="180" y="92.5" text-anchor="end" font-size="12.5">150 bp per read · 8 thr</text><rect x="190" y="67" width="270.6" height="13" rx="3" fill="var(--old)"><title>9.39 M queries/s</title></rect><text x="466.6" y="78" font-size="11.5" class="mono">9.39</text><rect x="190" y="82" width="474.3" height="13" rx="3" fill="var(--new)"><title>16.46 M queries/s</title></rect><text x="670.3" y="93" font-size="11.5" class="mono">16.46  1.75×</text><rect x="190" y="97" width="519.8" height="13" rx="3" fill="var(--hash)"><title>18.04 M queries/s</title></rect><text x="715.8" y="108" font-size="11.5" class="mono">18.04  1.92×</text><text x="180" y="153.5" text-anchor="end" font-size="12.5">10 kb per read · 1 thr</text><rect x="190" y="128" width="65.7" height="13" rx="3" fill="var(--old)"><title>2.28 M queries/s</title></rect><text x="261.7" y="139" font-size="11.5" class="mono">2.28</text><rect x="190" y="143" width="107.5" height="13" rx="3" fill="var(--new)"><title>3.73 M queries/s</title></rect><text x="303.5" y="154" font-size="11.5" class="mono">3.73  1.64×</text><rect x="190" y="158" width="108.3" height="13" rx="3" fill="var(--hash)"><title>3.76 M queries/s</title></rect><text x="304.3" y="169" font-size="11.5" class="mono">3.76  1.65×</text><text x="180" y="214.5" text-anchor="end" font-size="12.5">10 kb per read · 8 thr</text><rect x="190" y="189" width="359.9" height="13" rx="3" fill="var(--old)"><title>12.49 M queries/s</title></rect><text x="555.9" y="200" font-size="11.5" class="mono">12.49</text><rect x="190" y="204" width="498.5" height="13" rx="3" fill="var(--new)"><title>17.30 M queries/s</title></rect><text x="694.5" y="215" font-size="11.5" class="mono">17.30  1.39×</text><rect x="190" y="219" width="561.9" height="13" rx="3" fill="var(--hash)"><title>19.50 M queries/s</title></rect><text x="757.9" y="230" font-size="11.5" class="mono">19.50  1.56×</text><text x="180" y="275.5" text-anchor="end" font-size="12.5">150 bp stream · 1 thr</text><rect x="190" y="250" width="64.5" height="13" rx="3" fill="var(--old)"><title>2.24 M queries/s</title></rect><text x="260.5" y="261" font-size="11.5" class="mono">2.24</text><rect x="190" y="265" width="103.7" height="13" rx="3" fill="var(--new)"><title>3.60 M queries/s</title></rect><text x="299.7" y="276" font-size="11.5" class="mono">3.60  1.61×</text><rect x="190" y="280" width="104.6" height="13" rx="3" fill="var(--hash)"><title>3.63 M queries/s</title></rect><text x="300.6" y="291" font-size="11.5" class="mono">3.63  1.62×</text><text x="180" y="336.5" text-anchor="end" font-size="12.5">150 bp stream · 8 thr</text><rect x="190" y="311" width="347.2" height="13" rx="3" fill="var(--old)"><title>12.05 M queries/s</title></rect><text x="543.2" y="322" font-size="11.5" class="mono">12.05</text><rect x="190" y="326" width="463.4" height="13" rx="3" fill="var(--new)"><title>16.08 M queries/s</title></rect><text x="659.4" y="337" font-size="11.5" class="mono">16.08  1.33×</text><rect x="190" y="341" width="535.1" height="13" rx="3" fill="var(--hash)"><title>18.57 M queries/s</title></rect><text x="731.1" y="352" font-size="11.5" class="mono">18.57  1.54×</text><line class="axis" x1="190" x2="190" y1="0" y2="360"/></svg></div>
+<h3>Every variant</h3><p class="muted">M queries/s; the ratio is against the first row in the same column. "pf": the batch prefetch (the old blob prefetches the key block 24 lookups ahead; the packed index runs its pipeline).</p>
+<div class="scroll"><table><tr><th>Variant</th><th class="num">Load s</th><th class="num">RSS GB</th><th class="num">150 bp<br>per read<br>1t</th><th class="num">150 bp<br>per read<br>1t pf</th><th class="num">150 bp<br>per read<br>8t</th><th class="num">150 bp<br>per read<br>8t pf</th><th class="num">10 kb<br>per read<br>1t</th><th class="num">10 kb<br>per read<br>1t pf</th><th class="num">10 kb<br>per read<br>8t</th><th class="num">10 kb<br>per read<br>8t pf</th><th class="num">150 bp<br>stream<br>1t</th><th class="num">150 bp<br>stream<br>1t pf</th><th class="num">150 bp<br>stream<br>8t</th><th class="num">150 bp<br>stream<br>8t pf</th><th class="num">all values<br>1t</th><th class="num">all values<br>1t pf</th><th class="num">all values<br>8t</th><th class="num">all values<br>8t pf</th><th class="num">random<br>keys<br>1t</th><th class="num">random<br>keys<br>1t pf</th><th class="num">random<br>keys<br>8t</th><th class="num">random<br>keys<br>8t pf</th></tr>
+<tr class="base"><td>Flexmap blob (flexalign today)</td><td class="num">13.8</td><td class="num">7.58</td>
+<td class="num">1.56</td>
+<td class="num">1.57</td>
+<td class="num">9.15</td>
+<td class="num">9.39</td>
+<td class="num">1.56</td>
+<td class="num">2.28</td>
+<td class="num">9.21</td>
+<td class="num">12.49</td>
+<td class="num">1.51</td>
+<td class="num">2.24</td>
+<td class="num">9.24</td>
+<td class="num">12.05</td>
+<td class="num">2.28</td>
+<td class="num">4.25</td>
+<td class="num">15.91</td>
+<td class="num">21.05</td>
+<td class="num">35.78</td>
+<td class="num">45.02</td>
+<td class="num">127.97</td>
+<td class="num">156.19</td>
+</tr>
+<tr class=""><td>Flexmap blob + huge pages</td><td class="num">30.4</td><td class="num">7.58</td>
+<td class="num">2.14 <span class="up">1.37×</span></td>
+<td class="num">2.18 <span class="up">1.39×</span></td>
+<td class="num">11.32 <span class="up">1.24×</span></td>
+<td class="num">11.56 <span class="up">1.23×</span></td>
+<td class="num">2.17 <span class="up">1.39×</span></td>
+<td class="num">2.97 <span class="up">1.30×</span></td>
+<td class="num">11.80 <span class="up">1.28×</span></td>
+<td class="num">14.76 <span class="up">1.18×</span></td>
+<td class="num">2.17 <span class="up">1.44×</span></td>
+<td class="num">2.91 <span class="up">1.30×</span></td>
+<td class="num">11.41 <span class="up">1.23×</span></td>
+<td class="num">14.41 <span class="up">1.20×</span></td>
+<td class="num">3.67 <span class="up">1.61×</span></td>
+<td class="num">6.13 <span class="up">1.44×</span></td>
+<td class="num">18.71 <span class="up">1.18×</span></td>
+<td class="num">25.65 <span class="up">1.22×</span></td>
+<td class="num">46.93 <span class="up">1.31×</span></td>
+<td class="num">67.44 <span class="up">1.50×</span></td>
+<td class="num">128.97 <span class="muted">1.01×</span></td>
+<td class="num">169.02 <span class="up">1.08×</span></td>
+</tr>
+<tr class=""><td>Packed, compact keys</td><td class="num">0.5</td><td class="num">4.12</td>
+<td class="num">1.72 <span class="up">1.10×</span></td>
+<td class="num">3.18 <span class="up">2.03×</span></td>
+<td class="num">9.97 <span class="up">1.09×</span></td>
+<td class="num">16.46 <span class="up">1.75×</span></td>
+<td class="num">1.73 <span class="up">1.11×</span></td>
+<td class="num">3.73 <span class="up">1.64×</span></td>
+<td class="num">10.11 <span class="up">1.10×</span></td>
+<td class="num">17.30 <span class="up">1.39×</span></td>
+<td class="num">1.71 <span class="up">1.13×</span></td>
+<td class="num">3.60 <span class="up">1.61×</span></td>
+<td class="num">9.51 <span class="muted">1.03×</span></td>
+<td class="num">16.08 <span class="up">1.33×</span></td>
+<td class="num">2.23 <span class="muted">0.98×</span></td>
+<td class="num">6.33 <span class="up">1.49×</span></td>
+<td class="num">11.84 <span class="down">0.74×</span></td>
+<td class="num">20.51 <span class="muted">0.97×</span></td>
+<td class="num">30.45 <span class="down">0.85×</span></td>
+<td class="num">55.80 <span class="up">1.24×</span></td>
+<td class="num">120.08 <span class="down">0.94×</span></td>
+<td class="num">191.87 <span class="up">1.23×</span></td>
+</tr>
+<tr class=""><td>Packed, hashed keys</td><td class="num">0.8</td><td class="num">4.35</td>
+<td class="num">2.24 <span class="up">1.44×</span></td>
+<td class="num">3.37 <span class="up">2.15×</span></td>
+<td class="num">12.19 <span class="up">1.33×</span></td>
+<td class="num">18.04 <span class="up">1.92×</span></td>
+<td class="num">2.30 <span class="up">1.47×</span></td>
+<td class="num">3.76 <span class="up">1.65×</span></td>
+<td class="num">10.41 <span class="up">1.13×</span></td>
+<td class="num">19.50 <span class="up">1.56×</span></td>
+<td class="num">2.23 <span class="up">1.48×</span></td>
+<td class="num">3.63 <span class="up">1.62×</span></td>
+<td class="num">12.40 <span class="up">1.34×</span></td>
+<td class="num">18.57 <span class="up">1.54×</span></td>
+<td class="num">3.64 <span class="up">1.60×</span></td>
+<td class="num">7.14 <span class="up">1.68×</span></td>
+<td class="num">17.10 <span class="up">1.07×</span></td>
+<td class="num">22.74 <span class="up">1.08×</span></td>
+<td class="num">13.77 <span class="down">0.38×</span></td>
+<td class="num">27.29 <span class="down">0.61×</span></td>
+<td class="num">48.56 <span class="down">0.38×</span></td>
+<td class="num">85.04 <span class="down">0.54×</span></td>
+</tr>
+</table></div>
+<p class="muted">Seeds emitted per lookup: 15.9; values per key looked up: 33.3.</p>
+<h2>D2 · 300 Bacteroides uniformis genomes</h2><p class="muted">1.31 Gbp in 45,328 contigs, one species: a k-mer occurs in many genomes (~150 seeds per lookup)</p>
+<div class="tiles"><div class="tile"><div class="k">Index memory (GB)</div><div class="v">5.74 → 2.50</div><div class="s">old: keys 2.68 + values 3.06; compact: keys 0.18 + values 2.32; 48.5 bits a value cell, not 64. 0.9% of the 4<sup>15</sup> keys are used.</div></div><div class="tile"><div class="k">Short reads (150 bp), 1 thread</div><div class="v">1.36× faster</div><div class="s">0.84 → 1.14 M seed lookups/s (compact keys)</div></div><div class="tile"><div class="k">Long reads (10 kb), 1 thread</div><div class="v">1.21× faster</div><div class="s">0.97 → 1.17 M seed lookups/s (compact keys)</div></div><div class="tile"><div class="k">Same answers</div><div class="v">yes</div><div class="s">the hash of every emitted (position, reference, distance, ties) per query agrees across all variants</div></div></div>
+<h3>Lookups per second (prefetch on)</h3><div class="legend"><span><span class="sw" style="background:var(--old)"></span>Flexmap blob (flexalign today)</span><span><span class="sw" style="background:var(--new)"></span>Packed, compact keys</span></div>
+<div class="scroll"><svg viewBox="0 0 860 286" width="100%" style="max-width:860px;min-width:560px" role="img" aria-label="Lookups per second by variant"><text x="180" y="24.0" text-anchor="end" font-size="12.5">150 bp per read · 1 thr</text><rect x="190" y="6" width="81.1" height="13" rx="3" fill="var(--old)"><title>0.84 M queries/s</title></rect><text x="277.1" y="17" font-size="11.5" class="mono">0.84</text><rect x="190" y="21" width="110.1" height="13" rx="3" fill="var(--new)"><title>1.14 M queries/s</title></rect><text x="306.1" y="32" font-size="11.5" class="mono">1.14  1.36×</text><text x="180" y="70.0" text-anchor="end" font-size="12.5">150 bp per read · 8 thr</text><rect x="190" y="52" width="420.9" height="13" rx="3" fill="var(--old)"><title>4.36 M queries/s</title></rect><text x="616.9" y="63" font-size="11.5" class="mono">4.36</text><rect x="190" y="67" width="541.6" height="13" rx="3" fill="var(--new)"><title>5.61 M queries/s</title></rect><text x="737.6" y="78" font-size="11.5" class="mono">5.61  1.29×</text><text x="180" y="116.0" text-anchor="end" font-size="12.5">10 kb per read · 1 thr</text><rect x="190" y="98" width="93.7" height="13" rx="3" fill="var(--old)"><title>0.97 M queries/s</title></rect><text x="289.7" y="109" font-size="11.5" class="mono">0.97</text><rect x="190" y="113" width="113.0" height="13" rx="3" fill="var(--new)"><title>1.17 M queries/s</title></rect><text x="309.0" y="124" font-size="11.5" class="mono">1.17  1.21×</text><text x="180" y="162.0" text-anchor="end" font-size="12.5">10 kb per read · 8 thr</text><rect x="190" y="144" width="461.5" height="13" rx="3" fill="var(--old)"><title>4.78 M queries/s</title></rect><text x="657.5" y="155" font-size="11.5" class="mono">4.78</text><rect x="190" y="159" width="526.2" height="13" rx="3" fill="var(--new)"><title>5.45 M queries/s</title></rect><text x="722.2" y="170" font-size="11.5" class="mono">5.45  1.14×</text><text x="180" y="208.0" text-anchor="end" font-size="12.5">150 bp stream · 1 thr</text><rect x="190" y="190" width="97.5" height="13" rx="3" fill="var(--old)"><title>1.01 M queries/s</title></rect><text x="293.5" y="201" font-size="11.5" class="mono">1.01</text><rect x="190" y="205" width="112.0" height="13" rx="3" fill="var(--new)"><title>1.16 M queries/s</title></rect><text x="308.0" y="216" font-size="11.5" class="mono">1.16  1.15×</text><text x="180" y="254.0" text-anchor="end" font-size="12.5">150 bp stream · 8 thr</text><rect x="190" y="236" width="486.6" height="13" rx="3" fill="var(--old)"><title>5.04 M queries/s</title></rect><text x="682.6" y="247" font-size="11.5" class="mono">5.04</text><rect x="190" y="251" width="561.9" height="13" rx="3" fill="var(--new)"><title>5.82 M queries/s</title></rect><text x="757.9" y="262" font-size="11.5" class="mono">5.82  1.15×</text><line class="axis" x1="190" x2="190" y1="0" y2="270"/></svg></div>
+<h3>Every variant</h3><p class="muted">M queries/s; the ratio is against the first row in the same column. "pf": the batch prefetch (the old blob prefetches the key block 24 lookups ahead; the packed index runs its pipeline).</p>
+<div class="scroll"><table><tr><th>Variant</th><th class="num">Load s</th><th class="num">RSS GB</th><th class="num">150 bp<br>per read<br>1t</th><th class="num">150 bp<br>per read<br>1t pf</th><th class="num">150 bp<br>per read<br>8t</th><th class="num">150 bp<br>per read<br>8t pf</th><th class="num">10 kb<br>per read<br>1t</th><th class="num">10 kb<br>per read<br>1t pf</th><th class="num">10 kb<br>per read<br>8t</th><th class="num">10 kb<br>per read<br>8t pf</th><th class="num">150 bp<br>stream<br>1t</th><th class="num">150 bp<br>stream<br>1t pf</th><th class="num">150 bp<br>stream<br>8t</th><th class="num">150 bp<br>stream<br>8t pf</th><th class="num">all values<br>1t</th><th class="num">all values<br>1t pf</th><th class="num">all values<br>8t</th><th class="num">all values<br>8t pf</th><th class="num">random<br>keys<br>1t</th><th class="num">random<br>keys<br>1t pf</th><th class="num">random<br>keys<br>8t</th><th class="num">random<br>keys<br>8t pf</th></tr>
+<tr class="base"><td>Flexmap blob (flexalign today)</td><td class="num">9.8</td><td class="num">5.74</td>
+<td class="num">0.84</td>
+<td class="num">0.84</td>
+<td class="num">4.27</td>
+<td class="num">4.36</td>
+<td class="num">0.83</td>
+<td class="num">0.97</td>
+<td class="num">4.27</td>
+<td class="num">4.78</td>
+<td class="num">0.83</td>
+<td class="num">1.01</td>
+<td class="num">4.41</td>
+<td class="num">5.04</td>
+<td class="num">1.45</td>
+<td class="num">2.23</td>
+<td class="num">7.69</td>
+<td class="num">8.69</td>
+<td class="num">47.54</td>
+<td class="num">61.21</td>
+<td class="num">146.50</td>
+<td class="num">203.63</td>
+</tr>
+<tr class=""><td>Flexmap blob + huge pages</td><td class="num">3.5</td><td class="num">5.74</td>
+<td class="num">0.99 <span class="up">1.18×</span></td>
+<td class="num">0.96 <span class="up">1.14×</span></td>
+<td class="num">4.81 <span class="up">1.13×</span></td>
+<td class="num">4.88 <span class="up">1.12×</span></td>
+<td class="num">0.97 <span class="up">1.17×</span></td>
+<td class="num">1.09 <span class="up">1.12×</span></td>
+<td class="num">4.69 <span class="up">1.10×</span></td>
+<td class="num">5.28 <span class="up">1.10×</span></td>
+<td class="num">0.98 <span class="up">1.18×</span></td>
+<td class="num">1.11 <span class="up">1.10×</span></td>
+<td class="num">4.97 <span class="up">1.13×</span></td>
+<td class="num">5.49 <span class="up">1.09×</span></td>
+<td class="num">2.00 <span class="up">1.38×</span></td>
+<td class="num">2.70 <span class="up">1.21×</span></td>
+<td class="num">8.19 <span class="up">1.07×</span></td>
+<td class="num">9.49 <span class="up">1.09×</span></td>
+<td class="num">60.36 <span class="up">1.27×</span></td>
+<td class="num">81.54 <span class="up">1.33×</span></td>
+<td class="num">166.65 <span class="up">1.14×</span></td>
+<td class="num">197.62 <span class="muted">0.97×</span></td>
+</tr>
+<tr class=""><td>Flexmap blob, mmap</td><td class="num">0.0</td><td class="num">0.00</td>
+<td class="num">0.81 <span class="muted">0.96×</span></td>
+<td class="num">0.83 <span class="muted">0.99×</span></td>
+<td class="num">4.20 <span class="muted">0.98×</span></td>
+<td class="num">4.28 <span class="muted">0.98×</span></td>
+<td class="num">0.79 <span class="muted">0.95×</span></td>
+<td class="num">0.99 <span class="muted">1.02×</span></td>
+<td class="num">4.15 <span class="muted">0.97×</span></td>
+<td class="num">4.58 <span class="muted">0.96×</span></td>
+<td class="num">0.82 <span class="muted">0.99×</span></td>
+<td class="num">0.99 <span class="muted">0.98×</span></td>
+<td class="num">4.20 <span class="muted">0.95×</span></td>
+<td class="num">5.01 <span class="muted">0.99×</span></td>
+<td class="num">1.36 <span class="down">0.94×</span></td>
+<td class="num">1.84 <span class="down">0.83×</span></td>
+<td class="num">6.73 <span class="down">0.88×</span></td>
+<td class="num">8.68 <span class="muted">1.00×</span></td>
+<td class="num">47.72 <span class="muted">1.00×</span></td>
+<td class="num">64.25 <span class="muted">1.05×</span></td>
+<td class="num">152.53 <span class="muted">1.04×</span></td>
+<td class="num">193.26 <span class="down">0.95×</span></td>
+</tr>
+<tr class=""><td>Packed, compact keys, no huge pages</td><td class="num">0.3</td><td class="num">2.50</td>
+<td class="num">0.72 <span class="down">0.86×</span></td>
+<td class="num">1.03 <span class="up">1.23×</span></td>
+<td class="num">3.97 <span class="down">0.93×</span></td>
+<td class="num">4.96 <span class="up">1.14×</span></td>
+<td class="num">0.73 <span class="down">0.88×</span></td>
+<td class="num">1.05 <span class="up">1.08×</span></td>
+<td class="num">3.89 <span class="down">0.91×</span></td>
+<td class="num">5.34 <span class="up">1.12×</span></td>
+<td class="num">0.72 <span class="down">0.87×</span></td>
+<td class="num">1.05 <span class="muted">1.04×</span></td>
+<td class="num">3.79 <span class="down">0.86×</span></td>
+<td class="num">4.76 <span class="down">0.94×</span></td>
+<td class="num">1.09 <span class="down">0.75×</span></td>
+<td class="num">1.73 <span class="down">0.78×</span></td>
+<td class="num">6.40 <span class="down">0.83×</span></td>
+<td class="num">8.15 <span class="down">0.94×</span></td>
+<td class="num">36.14 <span class="down">0.76×</span></td>
+<td class="num">51.12 <span class="down">0.84×</span></td>
+<td class="num">147.90 <span class="muted">1.01×</span></td>
+<td class="num">195.83 <span class="muted">0.96×</span></td>
+</tr>
+<tr class=""><td>Packed, compact keys</td><td class="num">0.3</td><td class="num">2.50</td>
+<td class="num">0.84 <span class="muted">1.00×</span></td>
+<td class="num">1.14 <span class="up">1.36×</span></td>
+<td class="num">4.04 <span class="down">0.95×</span></td>
+<td class="num">5.61 <span class="up">1.29×</span></td>
+<td class="num">0.84 <span class="muted">1.01×</span></td>
+<td class="num">1.17 <span class="up">1.21×</span></td>
+<td class="num">4.26 <span class="muted">1.00×</span></td>
+<td class="num">5.45 <span class="up">1.14×</span></td>
+<td class="num">0.83 <span class="muted">1.00×</span></td>
+<td class="num">1.16 <span class="up">1.15×</span></td>
+<td class="num">4.49 <span class="muted">1.02×</span></td>
+<td class="num">5.82 <span class="up">1.15×</span></td>
+<td class="num">1.32 <span class="down">0.91×</span></td>
+<td class="num">1.84 <span class="down">0.83×</span></td>
+<td class="num">7.16 <span class="down">0.93×</span></td>
+<td class="num">8.19 <span class="down">0.94×</span></td>
+<td class="num">39.96 <span class="down">0.84×</span></td>
+<td class="num">55.87 <span class="down">0.91×</span></td>
+<td class="num">170.47 <span class="up">1.16×</span></td>
+<td class="num">211.27 <span class="muted">1.04×</span></td>
+</tr>
+<tr class=""><td>Packed, compact keys, mmap</td><td class="num">0.0</td><td class="num">0.00</td>
+<td class="num">0.75 <span class="down">0.89×</span></td>
+<td class="num">1.06 <span class="up">1.26×</span></td>
+<td class="num">3.95 <span class="down">0.93×</span></td>
+<td class="num">5.46 <span class="up">1.25×</span></td>
+<td class="num">0.74 <span class="down">0.89×</span></td>
+<td class="num">1.05 <span class="up">1.08×</span></td>
+<td class="num">3.85 <span class="down">0.90×</span></td>
+<td class="num">5.22 <span class="up">1.09×</span></td>
+<td class="num">0.74 <span class="down">0.89×</span></td>
+<td class="num">1.06 <span class="muted">1.05×</span></td>
+<td class="num">4.12 <span class="down">0.93×</span></td>
+<td class="num">5.59 <span class="up">1.11×</span></td>
+<td class="num">1.08 <span class="down">0.74×</span></td>
+<td class="num">1.75 <span class="down">0.78×</span></td>
+<td class="num">6.48 <span class="down">0.84×</span></td>
+<td class="num">8.41 <span class="muted">0.97×</span></td>
+<td class="num">36.10 <span class="down">0.76×</span></td>
+<td class="num">52.88 <span class="down">0.86×</span></td>
+<td class="num">163.15 <span class="up">1.11×</span></td>
+<td class="num">260.06 <span class="up">1.28×</span></td>
+</tr>
+</table></div>
+<p class="muted">Seeds emitted per lookup: 148.8; values per key looked up: 175.8.</p>
+<h2>D3 · human GRCh37 chr1–8</h2><p class="muted">1.54 Gbp in 8 chromosomes: repeats</p>
+<div class="tiles"><div class="tile"><div class="k">Index memory (GB)</div><div class="v">5.76 → 2.39 → 2.61</div><div class="s">old: keys 2.68 + values 3.08; compact: keys 0.31 + values 2.08; hashed: keys 0.54 + values 2.08; 43.2 bits a value cell, not 64. 4.7% of the 4<sup>15</sup> keys are used.</div></div><div class="tile"><div class="k">Short reads (150 bp), 1 thread</div><div class="v">1.87× faster</div><div class="s">1.88 → 3.51 M seed lookups/s (hashed keys)</div></div><div class="tile"><div class="k">Long reads (10 kb), 1 thread</div><div class="v">1.37× faster</div><div class="s">2.79 → 3.82 M seed lookups/s (hashed keys)</div></div><div class="tile"><div class="k">Same answers</div><div class="v">yes</div><div class="s">the hash of every emitted (position, reference, distance, ties) per query agrees across all variants</div></div></div>
+<h3>Lookups per second (prefetch on)</h3><div class="legend"><span><span class="sw" style="background:var(--old)"></span>Flexmap blob (flexalign today)</span><span><span class="sw" style="background:var(--new)"></span>Packed, compact keys</span><span><span class="sw" style="background:var(--hash)"></span>Packed, hashed keys</span></div>
+<div class="scroll"><svg viewBox="0 0 860 376" width="100%" style="max-width:860px;min-width:560px" role="img" aria-label="Lookups per second by variant"><text x="180" y="31.5" text-anchor="end" font-size="12.5">150 bp per read · 1 thr</text><rect x="190" y="6" width="50.7" height="13" rx="3" fill="var(--old)"><title>1.88 M queries/s</title></rect><text x="246.7" y="17" font-size="11.5" class="mono">1.88</text><rect x="190" y="21" width="90.9" height="13" rx="3" fill="var(--new)"><title>3.37 M queries/s</title></rect><text x="286.9" y="32" font-size="11.5" class="mono">3.37  1.79×</text><rect x="190" y="36" width="94.7" height="13" rx="3" fill="var(--hash)"><title>3.51 M queries/s</title></rect><text x="290.7" y="47" font-size="11.5" class="mono">3.51  1.87×</text><text x="180" y="92.5" text-anchor="end" font-size="12.5">150 bp per read · 8 thr</text><rect x="190" y="67" width="300.8" height="13" rx="3" fill="var(--old)"><title>11.15 M queries/s</title></rect><text x="496.8" y="78" font-size="11.5" class="mono">11.15</text><rect x="190" y="82" width="501.5" height="13" rx="3" fill="var(--new)"><title>18.59 M queries/s</title></rect><text x="697.5" y="93" font-size="11.5" class="mono">18.59  1.67×</text><rect x="190" y="97" width="495.3" height="13" rx="3" fill="var(--hash)"><title>18.36 M queries/s</title></rect><text x="691.3" y="108" font-size="11.5" class="mono">18.36  1.65×</text><text x="180" y="153.5" text-anchor="end" font-size="12.5">10 kb per read · 1 thr</text><rect x="190" y="128" width="75.3" height="13" rx="3" fill="var(--old)"><title>2.79 M queries/s</title></rect><text x="271.3" y="139" font-size="11.5" class="mono">2.79</text><rect x="190" y="143" width="102.8" height="13" rx="3" fill="var(--new)"><title>3.81 M queries/s</title></rect><text x="298.8" y="154" font-size="11.5" class="mono">3.81  1.37×</text><rect x="190" y="158" width="103.0" height="13" rx="3" fill="var(--hash)"><title>3.82 M queries/s</title></rect><text x="299.0" y="169" font-size="11.5" class="mono">3.82  1.37×</text><text x="180" y="214.5" text-anchor="end" font-size="12.5">10 kb per read · 8 thr</text><rect x="190" y="189" width="471.5" height="13" rx="3" fill="var(--old)"><title>17.48 M queries/s</title></rect><text x="667.5" y="200" font-size="11.5" class="mono">17.48</text><rect x="190" y="204" width="517.1" height="13" rx="3" fill="var(--new)"><title>19.17 M queries/s</title></rect><text x="713.1" y="215" font-size="11.5" class="mono">19.17  1.10×</text><rect x="190" y="219" width="561.9" height="13" rx="3" fill="var(--hash)"><title>20.83 M queries/s</title></rect><text x="757.9" y="230" font-size="11.5" class="mono">20.83  1.19×</text><text x="180" y="275.5" text-anchor="end" font-size="12.5">150 bp stream · 1 thr</text><rect x="190" y="250" width="73.1" height="13" rx="3" fill="var(--old)"><title>2.71 M queries/s</title></rect><text x="269.1" y="261" font-size="11.5" class="mono">2.71</text><rect x="190" y="265" width="100.1" height="13" rx="3" fill="var(--new)"><title>3.71 M queries/s</title></rect><text x="296.1" y="276" font-size="11.5" class="mono">3.71  1.37×</text><rect x="190" y="280" width="98.2" height="13" rx="3" fill="var(--hash)"><title>3.64 M queries/s</title></rect><text x="294.2" y="291" font-size="11.5" class="mono">3.64  1.34×</text><text x="180" y="336.5" text-anchor="end" font-size="12.5">150 bp stream · 8 thr</text><rect x="190" y="311" width="373.6" height="13" rx="3" fill="var(--old)"><title>13.85 M queries/s</title></rect><text x="569.6" y="322" font-size="11.5" class="mono">13.85</text><rect x="190" y="326" width="528.5" height="13" rx="3" fill="var(--new)"><title>19.59 M queries/s</title></rect><text x="724.5" y="337" font-size="11.5" class="mono">19.59  1.41×</text><rect x="190" y="341" width="539.0" height="13" rx="3" fill="var(--hash)"><title>19.98 M queries/s</title></rect><text x="735.0" y="352" font-size="11.5" class="mono">19.98  1.44×</text><line class="axis" x1="190" x2="190" y1="0" y2="360"/></svg></div>
+<h3>Every variant</h3><p class="muted">M queries/s; the ratio is against the first row in the same column. "pf": the batch prefetch (the old blob prefetches the key block 24 lookups ahead; the packed index runs its pipeline).</p>
+<div class="scroll"><table><tr><th>Variant</th><th class="num">Load s</th><th class="num">RSS GB</th><th class="num">150 bp<br>per read<br>1t</th><th class="num">150 bp<br>per read<br>1t pf</th><th class="num">150 bp<br>per read<br>8t</th><th class="num">150 bp<br>per read<br>8t pf</th><th class="num">10 kb<br>per read<br>1t</th><th class="num">10 kb<br>per read<br>1t pf</th><th class="num">10 kb<br>per read<br>8t</th><th class="num">10 kb<br>per read<br>8t pf</th><th class="num">150 bp<br>stream<br>1t</th><th class="num">150 bp<br>stream<br>1t pf</th><th class="num">150 bp<br>stream<br>8t</th><th class="num">150 bp<br>stream<br>8t pf</th><th class="num">all values<br>1t</th><th class="num">all values<br>1t pf</th><th class="num">all values<br>8t</th><th class="num">all values<br>8t pf</th><th class="num">random<br>keys<br>1t</th><th class="num">random<br>keys<br>1t pf</th><th class="num">random<br>keys<br>8t</th><th class="num">random<br>keys<br>8t pf</th></tr>
+<tr class="base"><td>Flexmap blob (flexalign today)</td><td class="num">2.6</td><td class="num">5.76</td>
+<td class="num">1.83</td>
+<td class="num">1.88</td>
+<td class="num">10.91</td>
+<td class="num">11.15</td>
+<td class="num">1.88</td>
+<td class="num">2.79</td>
+<td class="num">10.96</td>
+<td class="num">17.48</td>
+<td class="num">1.82</td>
+<td class="num">2.71</td>
+<td class="num">10.60</td>
+<td class="num">13.85</td>
+<td class="num">2.75</td>
+<td class="num">5.13</td>
+<td class="num">17.30</td>
+<td class="num">22.32</td>
+<td class="num">40.81</td>
+<td class="num">54.21</td>
+<td class="num">141.45</td>
+<td class="num">162.64</td>
+</tr>
+<tr class=""><td>Flexmap blob + huge pages</td><td class="num">1.4</td><td class="num">5.76</td>
+<td class="num">2.69 <span class="up">1.47×</span></td>
+<td class="num">2.74 <span class="up">1.46×</span></td>
+<td class="num">13.08 <span class="up">1.20×</span></td>
+<td class="num">12.94 <span class="up">1.16×</span></td>
+<td class="num">2.73 <span class="up">1.45×</span></td>
+<td class="num">3.56 <span class="up">1.28×</span></td>
+<td class="num">12.81 <span class="up">1.17×</span></td>
+<td class="num">15.62 <span class="down">0.89×</span></td>
+<td class="num">2.70 <span class="up">1.48×</span></td>
+<td class="num">3.52 <span class="up">1.30×</span></td>
+<td class="num">12.98 <span class="up">1.22×</span></td>
+<td class="num">15.66 <span class="up">1.13×</span></td>
+<td class="num">4.50 <span class="up">1.64×</span></td>
+<td class="num">7.08 <span class="up">1.38×</span></td>
+<td class="num">20.43 <span class="up">1.18×</span></td>
+<td class="num">25.15 <span class="up">1.13×</span></td>
+<td class="num">53.65 <span class="up">1.31×</span></td>
+<td class="num">75.20 <span class="up">1.39×</span></td>
+<td class="num">156.53 <span class="up">1.11×</span></td>
+<td class="num">184.14 <span class="up">1.13×</span></td>
+</tr>
+<tr class=""><td>Packed, compact keys</td><td class="num">0.3</td><td class="num">2.39</td>
+<td class="num">1.96 <span class="up">1.07×</span></td>
+<td class="num">3.37 <span class="up">1.79×</span></td>
+<td class="num">11.99 <span class="up">1.10×</span></td>
+<td class="num">18.59 <span class="up">1.67×</span></td>
+<td class="num">1.98 <span class="up">1.05×</span></td>
+<td class="num">3.81 <span class="up">1.37×</span></td>
+<td class="num">12.47 <span class="up">1.14×</span></td>
+<td class="num">19.17 <span class="up">1.10×</span></td>
+<td class="num">1.96 <span class="up">1.08×</span></td>
+<td class="num">3.71 <span class="up">1.37×</span></td>
+<td class="num">12.11 <span class="up">1.14×</span></td>
+<td class="num">19.59 <span class="up">1.41×</span></td>
+<td class="num">2.34 <span class="down">0.85×</span></td>
+<td class="num">4.93 <span class="muted">0.96×</span></td>
+<td class="num">12.41 <span class="down">0.72×</span></td>
+<td class="num">20.23 <span class="down">0.91×</span></td>
+<td class="num">29.53 <span class="down">0.72×</span></td>
+<td class="num">46.07 <span class="down">0.85×</span></td>
+<td class="num">121.93 <span class="down">0.86×</span></td>
+<td class="num">176.36 <span class="up">1.08×</span></td>
+</tr>
+<tr class=""><td>Packed, hashed keys</td><td class="num">0.3</td><td class="num">2.61</td>
+<td class="num">2.40 <span class="up">1.31×</span></td>
+<td class="num">3.51 <span class="up">1.87×</span></td>
+<td class="num">14.18 <span class="up">1.30×</span></td>
+<td class="num">18.36 <span class="up">1.65×</span></td>
+<td class="num">2.45 <span class="up">1.30×</span></td>
+<td class="num">3.82 <span class="up">1.37×</span></td>
+<td class="num">14.52 <span class="up">1.32×</span></td>
+<td class="num">20.83 <span class="up">1.19×</span></td>
+<td class="num">2.41 <span class="up">1.32×</span></td>
+<td class="num">3.64 <span class="up">1.34×</span></td>
+<td class="num">14.44 <span class="up">1.36×</span></td>
+<td class="num">19.98 <span class="up">1.44×</span></td>
+<td class="num">3.31 <span class="up">1.20×</span></td>
+<td class="num">5.10 <span class="muted">0.99×</span></td>
+<td class="num">15.52 <span class="down">0.90×</span></td>
+<td class="num">22.42 <span class="muted">1.00×</span></td>
+<td class="num">14.14 <span class="down">0.35×</span></td>
+<td class="num">28.34 <span class="down">0.52×</span></td>
+<td class="num">54.67 <span class="down">0.39×</span></td>
+<td class="num">86.62 <span class="down">0.53×</span></td>
+</tr>
+</table></div>
+<p class="muted">Seeds emitted per lookup: 4.2; values per key looked up: 57.0.</p>
+<h2>What was changed, and what was tried</h2><ul>
+<li><b>Packed values.</b> A value takes ref_bits + pos_bits (17 + 24 = 41 bits at D1), not 64; flank cells stay 32-bit and byte-aligned so the flank scan reads plain integers; every value can be read on its own; the key table's offsets are unchanged.</li>
+<li><b>Compact key table.</b> A presence bit per key (448 keys and a rank count per 64-byte line) and a 24-bit start per used key, instead of a 16-bit cell for every one of the 4<sup>15</sup> keys (2.68 GB). A hit reads two lines, one after the other.</li>
+<li><b>Hashed key table</b> (added after the first results). The used keys in a table of 64-byte lines, 8 entries a line at load ≤ 0.75, so a hit reads one line; 10.7 bytes a used key. A bit per line marks that keys homed there overflowed, so most misses read one line (random-key lookups 17 → 27 M/s at D1 with it); misses still cost more than in the compact table. Built from the compact file in 0.5 s, sharing its values. Its line count is any number (a key's home line is key × lines / 4<sup>15</sup>), not a power of two: D3's 50.43 M used keys took 1.07 GB of lines as a power of two and take 0.54 GB now (same lookups, 3.61 → 3.51 M/s per read at the lower load).</li>
+<li><b>Prefetch pipeline.</b> The key table 24 lookups ahead, a compact table's start 16 ahead, the values 8 ahead. The old blob prefetches the key block 24 ahead only, which never starts inside a 150 bp read (~24 k-mers); the packed pipeline still overlaps a read's own lookups.</li>
+<li><b>Huge pages</b> (madvise) for the large arrays, also in the old blob's loader: 1.2–1.4× for the old blob alone. <span class="mono">FLEXMAP_THP=0</span> turns them off (the baseline rows).</li>
+<li><b>Parallel load</b> of the packed file into a huge-page buffer; mmap is also offered.</li>
+<li><b>Two FMKeys fixes:</b> the occurrence count saturates instead of wrapping at 65,536, and a key whose cells would pass its block's 16-bit offset is left out instead of corrupting the block.</li>
+<li><b>Tried, no gain on D2</b> (table below): a one-pass flank scan, prefetching 16 or 32 value lines instead of 8, prefetch steps of 4 or 12, and a faster value decoder. D2 is bound by emitting its ~150 seeds a lookup (about 7 ns each in the consumer), which every variant pays alike.</li></ul>
+<div class="scroll"><table><tr><th>Packed compact, D2, 1 thread, prefetch on</th><th class="num">150 bp stream</th><th class="num">150 bp per read</th><th class="num">10 kb per read</th></tr>
+<tr><td>As first built (two-pass flank scan, 8 value lines, step 8)</td><td class="num">1.09</td><td class="num">1.05</td><td class="num">1.10</td></tr>
+<tr><td>One-pass flank scan</td><td class="num">1.09</td><td class="num">1.05</td><td class="num">1.08</td></tr>
+<tr><td>+ 16 value lines prefetched</td><td class="num">1.09</td><td class="num">1.07</td><td class="num">1.08</td></tr>
+<tr><td>+ 32 value lines</td><td class="num">1.03</td><td class="num">1.02</td><td class="num">1.04</td></tr>
+<tr><td>32 lines, step 4</td><td class="num">1.05</td><td class="num">1.04</td><td class="num">1.05</td></tr>
+<tr><td>32 lines, step 12</td><td class="num">1.05</td><td class="num">1.02</td><td class="num">1.04</td></tr>
+</table></div>
+<h2>Setup</h2><ul>
+<li>Index as flexalign builds it: K 31, C 15, F 16, closed syncmer S 4, 16 keys per block, header threshold 2, keys over 2,048 values left out.</li>
+<li>Queries are the true k-mers of contiguous sequence: reads drawn from the reference (random strand, 1% substitutions); every syncmer k-mer of a read, in read order, is a query, with its key and flank as the build makes them. <b>Per read</b>: one lookup call per read, as an aligner takes a read at a time. <b>Stream</b>: all reads' k-mers in one call per thread. <b>Random keys</b>: uniform over 2<sup>30</sup>.</li>
+<li>The consumer hashes every emitted seed (position, reference, distance, ties) into a per-query checksum; the sums are compared across variants. The unit tests compare every key of a test index field by field.</li>
+<li>Indexes on /dev/shm (RAM) or on SSD (D1 and D3 hashed), so load times are mostly memory speed. Each variant runs in its own process; threads take contiguous parts of the reads.</li>
+<li>Machine: Intel Core i9-13900HX (AVX2, no AVX-512), 12 logical CPUs, 31 GB RAM shared with other work, Linux 6.17, rustc nightly 1.99. Some loads ran under memory pressure, so load times vary; runs that swapped during lookups were repeated.</li></ul>
+</div>

@@ -16,6 +16,8 @@ pub mod values;
 pub mod flexmap;
 pub mod build;
 pub mod example;
+pub mod memory;
+pub mod packed;
 
 
 #[macro_use]

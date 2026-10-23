@@ -1,0 +1,4 @@
+build	$SCRATCH/data/d2_uniformis.fa	refs	45328	used_keys	10002468	cells	382490399	build_s	207.6	peak_rss_gb	5.79
+old	keys_gb	2.684	values_gb	3.060	total_gb	5.744
+old	save_s	1.8
+compact	keys_gb	0.185	values_gb	2.319	total_gb	2.503	ref_bits	16	pos_bits	23	bits_per_cell	48.50	convert_s	12.4

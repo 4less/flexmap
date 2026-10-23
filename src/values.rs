@@ -532,7 +532,7 @@ pub struct FMValues<const F: usize, const HEADER_THRESHOLD: usize> {
 impl<const F: usize, const HEADER_THRESHOLD: usize> FMValues<F, HEADER_THRESHOLD> {
     pub fn new(size: usize) -> Self {
         FMValues {
-            data: vec![VCell(0); size],
+            data: crate::memory::zeroed_vec(size),
         }
     }
 

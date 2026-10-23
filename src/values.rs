@@ -325,7 +325,7 @@ impl VCell {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct VRange<'a> {
     pub header: Option<&'a [HeaderSeq]>,
     pub positions: &'a [VCell],

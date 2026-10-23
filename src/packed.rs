@@ -33,8 +33,9 @@ use std::marker::PhantomData;
 
 use kmerrs::consecutive::kmer::Kmer;
 
-use crate::flexmap::Flexmap;
-use crate::keys::FMKeys;
+use crate::flexmap::{Flexmap, FlexmapBlob};
+use crate::keys::{FMKeys, KCell};
+use crate::values::VCell;
 use crate::memory::{prefetch, read_parallel, zeroed_words, Backing, Section};
 use crate::VD;
 
@@ -145,8 +146,9 @@ pub struct PackedRange<'a> {
     _bytes: PhantomData<&'a u8>,
 }
 
+/// The flank bases (2 bits each) that differ between flank cells `a` and `b`, as `HeaderSeq::dist`.
 #[inline(always)]
-fn flank_distance(a: u32, b: u32) -> u32 {
+pub fn flank_distance(a: u32, b: u32) -> u32 {
     let x = a ^ b;
     ((x & 0x5555_5555) | ((x & 0xAAAA_AAAA) >> 1)).count_ones()
 }
@@ -356,12 +358,8 @@ impl PackedValues {
         }
     }
 
-    /// Packs the values of `flexmap`, whose keys `locate` lists in key order as (key, start, cells).
-    fn from_flexmap<const C: usize, const F: usize, const CPB: u64, const T: usize>(
-        flexmap: &Flexmap<C, F, CPB, T>,
-        each_key: &dyn Fn(&mut dyn FnMut(u64, u64, u64)),
-    ) -> Self {
-        let cells = &flexmap.values.data;
+    /// Packs a Flexmap's value cells, whose keys `each_key` lists in key order as (key, start, cells).
+    fn from_cells<const T: usize>(cells: &[VCell], each_key: &dyn Fn(&mut dyn FnMut(u64, u64, u64))) -> Self {
         // Pass 1: the widths.
         let (mut max_ref, mut max_pos, mut max_slots) = (0u64, 0u64, 0u64);
         each_key(&mut |_key, start, slots| {
@@ -805,13 +803,22 @@ pub struct PackedFlexmap<K: SlotLocator, const C: usize, const F: usize, const H
 pub type PackedFlexmapStd = PackedFlexmap<CompactKeys, 15, 16, 2>;
 
 /// Lists a Flexmap's keys with values in key order, as (key, first cell, cells).
-fn flexmap_keys<const C: usize, const F: usize, const CPB: u64, const T: usize>(
-    flexmap: &Flexmap<C, F, CPB, T>,
-) -> impl Fn(&mut dyn FnMut(u64, u64, u64)) + '_ {
+/// Lists the keys with values of a Flexmap key table (its cells, as FMKeys or a blob hold them) in key
+/// order, as (key, first cell, cells).
+fn table_keys<const C: usize, const CPB: u64>(cells: &[KCell]) -> impl Fn(&mut dyn FnMut(u64, u64, u64)) + '_ {
+    assert_eq!(cells.len() as u64, FMKeys::<C, CPB>::table_size(), "key table of other C or CPB");
+    let head = |i: u64| -> u64 { (0..4).map(|j| (cells[(i + j) as usize].0 as u64) << (16 * j)).fold(0, |a, b| a | b) };
     move |f: &mut dyn FnMut(u64, u64, u64)| {
-        for key in 0..(1u64 << (2 * C)) {
-            if let Some((start, end)) = flexmap.keys.vrange(key) {
-                f(key, start as u64, (end - start) as u64);
+        let block_cells = 4 + CPB;
+        for block in 0..(1u64 << (2 * C)) / CPB {
+            let b = block * block_cells;
+            let (base, next) = (head(b), head(b + block_cells));
+            for j in 0..CPB {
+                let start = base + cells[(b + 4 + j) as usize].0 as u64;
+                let end = if j + 1 < CPB { base + cells[(b + 5 + j) as usize].0 as u64 } else { next };
+                if end > start {
+                    f(block * CPB + j, start, end - start);
+                }
             }
         }
     }
@@ -820,11 +827,22 @@ fn flexmap_keys<const C: usize, const F: usize, const CPB: u64, const T: usize>(
 impl<const C: usize, const F: usize, const T: usize> PackedFlexmap<CompactKeys, C, F, T> {
     /// `flexmap` with packed values and a compact key table.
     pub fn from_flexmap<const CPB: u64>(flexmap: &Flexmap<C, F, CPB, T>) -> Self {
-        let each_key = flexmap_keys(flexmap);
+        Self::from_cells::<CPB>(&flexmap.keys.data, &flexmap.values.data)
+    }
+
+    /// A Flexmap blob (as `Flexmap::load_blob` or `FlexmapBlob::mmap_from_file` give it) with packed
+    /// values and a compact key table: converts an existing index without rebuilding it.
+    pub fn from_blob<const CPB: u64>(blob: &FlexmapBlob<C, F, CPB, T>) -> Self {
+        Self::from_cells::<CPB>(blob.keys(), blob.values())
+    }
+
+    /// A Flexmap's key table and value cells.
+    pub fn from_cells<const CPB: u64>(keys: &[KCell], values: &[VCell]) -> Self {
+        let each_key = table_keys::<C, CPB>(keys);
         let mut used = 0u64;
         each_key(&mut |_, _, _| used += 1);
         let keys = CompactKeys::build(1u64 << (2 * C), used, &each_key);
-        Self { keys, values: PackedValues::from_flexmap(flexmap, &each_key) }
+        Self { keys, values: PackedValues::from_cells::<T>(values, &each_key) }
     }
 }
 
@@ -839,19 +857,19 @@ impl<const C: usize, const F: usize, const T: usize> PackedFlexmap<HashedKeys, C
 
     /// `flexmap` with packed values and a line-hashed key table; None if the table's fields do not fit.
     pub fn from_flexmap_hashed<const CPB: u64>(flexmap: &Flexmap<C, F, CPB, T>) -> Option<Self> {
-        let each_key = flexmap_keys(flexmap);
+        let each_key = table_keys::<C, CPB>(&flexmap.keys.data);
         let mut used = 0u64;
         each_key(&mut |_, _, _| used += 1);
         let keys = HashedKeys::build(1u64 << (2 * C), used, flexmap.values.data.len() as u64, &each_key)?;
-        Some(Self { keys, values: PackedValues::from_flexmap(flexmap, &each_key) })
+        Some(Self { keys, values: PackedValues::from_cells::<T>(&flexmap.values.data, &each_key) })
     }
 }
 
 impl<const C: usize, const F: usize, const T: usize, const CPB: u64> PackedFlexmap<DirectKeys<C, CPB>, C, F, T> {
     /// `flexmap` with packed values and its direct key table.
     pub fn from_flexmap_direct(flexmap: &Flexmap<C, F, CPB, T>) -> Self {
-        let each_key = flexmap_keys(flexmap);
-        Self { keys: DirectKeys::from_fmkeys(&flexmap.keys), values: PackedValues::from_flexmap(flexmap, &each_key) }
+        let each_key = table_keys::<C, CPB>(&flexmap.keys.data);
+        Self { keys: DirectKeys::from_fmkeys(&flexmap.keys), values: PackedValues::from_cells::<T>(&flexmap.values.data, &each_key) }
     }
 }
 
@@ -1123,6 +1141,17 @@ mod tests {
             assert_eq!(hashed.keys.locate(key), compact.keys.locate(key), "key {key}");
         }
         assert!(compact.values.memory_bytes() < flexmap.values.data.len() * 8);
+    }
+
+    #[test]
+    fn packed_flexmap_from_blob() {
+        let flexmap = random_flexmap();
+        let path = std::env::temp_dir().join(format!("flexmap_blob_to_packed_{}.bin", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        flexmap.save_blob(&path);
+        let blob = crate::flexmap::FlexmapBlob::<6, 8, 8, 2>::mmap_from_file(&path);
+        assert_same(&flexmap, &PackedFlexmap::<CompactKeys, 6, 8, 2>::from_blob(&blob));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod build;
 pub mod example;
 pub mod memory;
 pub mod packed;
+pub mod range;
 
 
 #[macro_use]

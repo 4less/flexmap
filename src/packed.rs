@@ -146,6 +146,11 @@ pub struct PackedRange<'a> {
     _bytes: PhantomData<&'a u8>,
 }
 
+// A PackedRange reads bytes that are never written while it lives (the index's sections are
+// immutable once built), so it can cross threads like the slices of a VRange.
+unsafe impl Send for PackedRange<'_> {}
+unsafe impl Sync for PackedRange<'_> {}
+
 /// The flank bases (2 bits each) that differ between flank cells `a` and `b`, as `HeaderSeq::dist`.
 #[inline(always)]
 pub fn flank_distance(a: u32, b: u32) -> u32 {
@@ -913,9 +918,9 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
     /// query `3 * step` ahead, its second read (a compact table's start) `2 * step` ahead, and the
     /// values of the query `step` ahead. The same calls as a loop over `get`.
     #[inline]
-    pub fn for_each_prefetched_with<Fun>(&self, queries: &[u64], step: usize, mut f: Fun)
+    pub fn for_each_prefetched_with<'s, Fun>(&'s self, queries: &[u64], step: usize, mut f: Fun)
     where
-        Fun: FnMut(usize, Option<PackedRange<'_>>),
+        Fun: FnMut(usize, Option<PackedRange<'s>>),
     {
         const RING: usize = 64;
         let step = step.clamp(1, RING / 3);
@@ -945,9 +950,9 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
 
     /// [`for_each_prefetched_with`](Self::for_each_prefetched_with) at the default distance (8).
     #[inline]
-    pub fn for_each_prefetched<Fun>(&self, queries: &[u64], f: Fun)
+    pub fn for_each_prefetched<'s, Fun>(&'s self, queries: &[u64], f: Fun)
     where
-        Fun: FnMut(usize, Option<PackedRange<'_>>),
+        Fun: FnMut(usize, Option<PackedRange<'s>>),
     {
         self.for_each_prefetched_with(queries, 8, f)
     }

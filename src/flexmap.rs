@@ -520,9 +520,9 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
     /// on out-of-cache workloads (~1.5x vs the scalar blob on a C=15 dataset). Uses the rolling
     /// single-pass strategy, which beat the 3-phase group pipeline in benchmarks.
     #[inline]
-    pub fn for_each_vrange_prefetched<Fun>(&self, queries: &[u64], f: Fun)
+    pub fn for_each_vrange_prefetched<'s, Fun>(&'s self, queries: &[u64], f: Fun)
     where
-        Fun: FnMut(u64, Option<VRange>),
+        Fun: FnMut(u64, Option<VRange<'s>>),
     {
         self.for_each_vrange_prefetched_rolling(queries, PREFETCH_DISTANCE, f)
     }
@@ -533,9 +533,9 @@ impl<const C: usize, const F: usize, const CELLS_PER_BODY: u64, const HEADER_THR
     /// beat a heavier 3-phase group pipeline in benchmarks (~1.5x vs scalar blob at `distance` 16-24
     /// on a C=15 out-of-cache dataset); see `docs/prefetch-pipeline.md`.
     #[inline]
-    pub fn for_each_vrange_prefetched_rolling<Fun>(&self, queries: &[u64], distance: usize, mut f: Fun)
+    pub fn for_each_vrange_prefetched_rolling<'s, Fun>(&'s self, queries: &[u64], distance: usize, mut f: Fun)
     where
-        Fun: FnMut(u64, Option<VRange>),
+        Fun: FnMut(u64, Option<VRange<'s>>),
     {
         let key_stride = mem::size_of::<KCell>();
         let keys_base = self.keys_ptr as *const u8;

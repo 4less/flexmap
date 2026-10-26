@@ -113,6 +113,62 @@ impl Backing {
     }
 }
 
+/// Bytes that several structures share: a file (or part of one) read into a huge-page buffer, or
+/// a whole file memory-mapped. [`Section`]s and a [`crate::packed::PackedFlexmap`] cut from it keep
+/// it alive, so one read or one mapping can back an index and anything stored next to it in the
+/// same file. Cloning shares the bytes.
+#[derive(Clone)]
+pub struct SharedBytes(Arc<Backing>, usize);
+
+impl SharedBytes {
+    pub(crate) fn from_arc(backing: Arc<Backing>) -> Self {
+        let len = backing.len();
+        Self(backing, len)
+    }
+
+    /// `len` bytes of `file` from `offset`, read on `threads` threads into huge pages
+    /// ([`read_parallel`]). The buffer is 8-byte aligned and starts on a page.
+    pub fn read(file: &File, offset: u64, len: usize, threads: usize) -> std::io::Result<Self> {
+        let mut words = zeroed_words((len + 7) / 8);
+        read_parallel(file, offset, &mut bytemuck::cast_slice_mut::<u64, u8>(&mut words)[..len], threads)?;
+        Ok(Self(Arc::new(Backing::Words(words)), len))
+    }
+
+    /// The whole of `file`, memory-mapped: nothing is read until a page is touched.
+    pub fn mmap(file: &File) -> std::io::Result<Self> {
+        let map = unsafe { memmap2::Mmap::map(file)? };
+        let len = map.len();
+        Ok(Self(Arc::new(Backing::Mapped(map)), len))
+    }
+
+    /// Whether the bytes are a file mapping (pages can be dropped and re-read) rather than memory.
+    pub fn is_mapped(&self) -> bool {
+        matches!(*self.0, Backing::Mapped(_))
+    }
+
+    /// The mapping, when the bytes are one.
+    pub fn mapping(&self) -> Option<&memmap2::Mmap> {
+        match &*self.0 {
+            Backing::Mapped(m) => Some(m),
+            Backing::Words(_) => None,
+        }
+    }
+
+    /// The bytes read or mapped (a read-in buffer is rounded up to whole words; this is not).
+    pub fn len(&self) -> usize {
+        self.1
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.0.base(), self.1) }
+    }
+
+    /// Bytes `[offset, offset + len)` as a section that keeps these bytes alive.
+    pub fn section(&self, offset: usize, len: usize) -> Section {
+        Section::view(&self.0, offset, len)
+    }
+}
+
 /// A read-only run of bytes inside a shared [`Backing`]. Cloning shares the backing.
 #[derive(Clone)]
 pub struct Section {

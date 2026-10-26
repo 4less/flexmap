@@ -36,7 +36,7 @@ use kmerrs::consecutive::kmer::Kmer;
 use crate::flexmap::{Flexmap, FlexmapBlob};
 use crate::keys::{FMKeys, KCell};
 use crate::values::VCell;
-use crate::memory::{prefetch, read_parallel, zeroed_words, Backing, Section};
+use crate::memory::{prefetch, read_parallel, zeroed_words, Backing, Section, SharedBytes};
 use crate::VD;
 
 #[cfg(not(target_endian = "little"))]
@@ -1064,6 +1064,15 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let mut file = std::io::BufWriter::with_capacity(8 << 20, File::create(path)?);
+        self.write_to(&mut file)?;
+        file.flush()
+    }
+
+    /// Writes the index as [`save`](Self::save) does, to any writer; returns the bytes written (a
+    /// multiple of 4096). Inside a larger file the index must start at a multiple of 4096, so its
+    /// sections keep their alignment; [`from_shared`](Self::from_shared) then reads it there.
+    pub fn write_to<W: Write>(&self, file: &mut W) -> std::io::Result<u64> {
         let mut sections = self.keys.sections();
         sections.push(self.values.data.clone());
         let l = &self.values.layout;
@@ -1085,7 +1094,6 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         }
         assert!(header.len() <= PACKED_ALIGN);
         header.resize(PACKED_ALIGN, 0);
-        let mut file = std::io::BufWriter::with_capacity(8 << 20, File::create(path)?);
         file.write_all(&header)?;
         let mut at = PACKED_ALIGN;
         for s in &sections {
@@ -1094,12 +1102,23 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
             file.write_all(&vec![0u8; end - at - s.len()])?;
             at = end;
         }
-        file.flush()
+        Ok(at as u64)
     }
 
     fn from_backing(backing: Backing) -> Self {
-        let backing = Section::backing(backing);
-        let all = Section::view(&backing, 0, PACKED_ALIGN);
+        Self::from_bytes_at(&SharedBytes::from_arc(Section::backing(backing)), 0)
+    }
+
+    /// The index written by [`write_to`](Self::write_to) at `offset` (a multiple of 4096) inside
+    /// `bytes`: a bundle file read or mapped once, of which the index is one part. Nothing is
+    /// copied; the index keeps `bytes` alive.
+    pub fn from_shared(bytes: &SharedBytes, offset: usize) -> Self {
+        assert_eq!(offset % PACKED_ALIGN, 0, "a packed flexmap must start on a 4096-byte boundary");
+        Self::from_bytes_at(bytes, offset)
+    }
+
+    fn from_bytes_at(bytes: &SharedBytes, base: usize) -> Self {
+        let all = bytes.section(base, PACKED_ALIGN);
         let mut r = HeaderReader(all.bytes(), 8);
         assert!(all.bytes()[..8] == PACKED_MAGIC, "not a packed flexmap");
         assert_eq!(r.u32(), PACKED_VERSION, "packed flexmap version");
@@ -1116,7 +1135,7 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         let sections: Vec<Section> = (0..count)
             .map(|_| {
                 let (offset, len) = (r.u64() as usize, r.u64() as usize);
-                Section::view(&backing, offset, len)
+                bytes.section(base + offset, len)
             })
             .collect();
         let layout = PackedLayout { ref_bits, pos_bits, header_threshold: T as u32, slot_bits32 };
@@ -1144,9 +1163,16 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
     /// Whether `path` holds a packed flexmap these parameters read.
     pub fn is_compatible(path: &str) -> bool {
         let mut head = [0u8; 28];
-        let ok = File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok();
-        let mut r = HeaderReader(&head, 8);
-        ok && head[..8] == PACKED_MAGIC
+        File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && Self::is_compatible_header(&head)
+    }
+
+    /// Whether `head`, the first 28 bytes of a packed flexmap, is one these parameters read.
+    pub fn is_compatible_header(head: &[u8]) -> bool {
+        if head.len() < 28 {
+            return false;
+        }
+        let mut r = HeaderReader(head, 8);
+        head[..8] == PACKED_MAGIC
             && r.u32() == PACKED_VERSION
             && r.u32() == C as u32
             && r.u32() == F as u32
@@ -1310,6 +1336,30 @@ mod tests {
         assert!(!PackedFlexmap::<DirectKeys<6, 8>, 6, 8, 2>::is_compatible(&path));
         assert_same(&flexmap, &PackedFlexmap::<CompactKeys, 6, 8, 2>::load(&path, 3).unwrap());
         assert_same(&flexmap, &PackedFlexmap::<CompactKeys, 6, 8, 2>::mmap(&path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn packed_flexmap_inside_a_larger_file() {
+        // An index written after 8192 bytes of other data and followed by more: read back from the
+        // shared bytes of the whole file, both read in and mapped, it answers as the original.
+        let flexmap = random_flexmap();
+        let packed = PackedFlexmap::<CompactKeys, 6, 8, 2>::from_flexmap(&flexmap);
+        let mut file_bytes = vec![7u8; 8192];
+        let written = packed.write_to(&mut file_bytes).unwrap();
+        assert_eq!(written as usize, file_bytes.len() - 8192);
+        assert_eq!(written % 4096, 0);
+        file_bytes.extend_from_slice(b"trailing data");
+        let path = std::env::temp_dir().join(format!("flexmap_shared_{}.bin", std::process::id()));
+        std::fs::write(&path, &file_bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        assert!(PackedFlexmap::<CompactKeys, 6, 8, 2>::is_compatible_header(&file_bytes[8192..]));
+        for bytes in [SharedBytes::read(&file, 0, file_bytes.len(), 3).unwrap(), SharedBytes::mmap(&file).unwrap()] {
+            assert_eq!(bytes.bytes(), &file_bytes[..]);
+            let index = PackedFlexmap::<CompactKeys, 6, 8, 2>::from_shared(&bytes, 8192);
+            drop(bytes); // the index keeps the bytes alive
+            assert_same(&flexmap, &index);
+        }
         std::fs::remove_file(&path).unwrap();
     }
 

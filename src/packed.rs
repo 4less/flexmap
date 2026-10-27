@@ -746,7 +746,9 @@ pub struct HashedKeys {
     keys: u64,
     used: u64,
     homes: u64,
-    key_bits: u32,
+    /// floor(homes * 2^64 / keys): a key's home line is the high word of key * mult, so the key
+    /// space need not be a power of two. For one that is, this is the old `key * homes >> key_bits`.
+    mult: u64,
     tag_bits: u32,
     start_bits: u32,
     lines: Section,
@@ -760,12 +762,11 @@ impl HashedKeys {
     /// In a line's first entry: keys homed at or before this line lie past it.
     const OVERFLOW: u64 = 1 << 63;
 
-    /// The table of `used` keys (keys < `keys`, a power of two), listed by `each_key` in key order.
+    /// The table of `used` keys (keys < `keys`), listed by `each_key` in key order.
     /// None if its fields do not fit 64 bits or a key would lie more than 31 lines past its home.
     pub fn build(keys: u64, used: u64, total_slots: u64, each_key: &dyn Fn(&mut dyn FnMut(u64, u64, u64))) -> Option<Self> {
-        let key_bits = keys.trailing_zeros();
         let homes = ((used as f64 / (Self::MAX_LOAD * Self::ENTRIES as f64)).ceil() as u64).max(1);
-        let tag_bits = bits_for((keys + homes - 1) / homes);
+        let (mult, tag_bits) = Self::mult_and_tag_bits(keys, homes);
         let start_bits = bits_for(total_slots);
         if tag_bits + Self::DISP_BITS + start_bits + Self::COUNT_BITS > 63 {
             return None;
@@ -777,7 +778,7 @@ impl HashedKeys {
         let mut fill = 0u64;
         let mut ok = true;
         each_key(&mut |key, start, slots| {
-            let home = (key * homes) >> key_bits;
+            let home = Self::home_of(key, mult);
             if home > cursor {
                 cursor = home;
                 fill = 0;
@@ -804,7 +805,23 @@ impl HashedKeys {
         if !ok || cursor as usize >= line_count {
             return None;
         }
-        Some(Self { keys, used, homes, key_bits, tag_bits, start_bits, lines: Section::from_words(words, line_count * 64) })
+        Some(Self { keys, used, homes, mult, tag_bits, start_bits, lines: Section::from_words(words, line_count * 64) })
+    }
+
+    /// The home multiplier, and the tag bits that tell apart the keys sharing a home: a home holds
+    /// at most ceil(2^64 / mult) consecutive keys.
+    /// A key space no larger than the home lines (a slice of a key or two) is taken as one more than
+    /// them, so every key still has a home line of its own.
+    fn mult_and_tag_bits(keys: u64, homes: u64) -> (u64, u32) {
+        let keys = keys.max(homes + 1);
+        let mult = (((homes as u128) << 64) / keys as u128) as u64;
+        let per_home = ((1u128 << 64) + mult as u128 - 1) / mult as u128;
+        (mult, bits_for(per_home as u64))
+    }
+
+    #[inline(always)]
+    fn home_of(key: u64, mult: u64) -> u64 {
+        ((key as u128 * mult as u128) >> 64) as u64
     }
 
     #[inline(always)]
@@ -818,7 +835,7 @@ impl SlotLocator for HashedKeys {
 
     #[inline(always)]
     fn locate(&self, key: u64) -> Option<(u64, u64)> {
-        let home = (key * self.homes) >> self.key_bits;
+        let home = Self::home_of(key, self.mult);
         let tag = key & ((1 << self.tag_bits) - 1);
         let low = self.tag_bits + Self::DISP_BITS;
         let low_mask = (1u64 << low) - 1;
@@ -841,7 +858,7 @@ impl SlotLocator for HashedKeys {
 
     #[inline(always)]
     fn prefetch_key(&self, key: u64) {
-        prefetch(self.line((key * self.homes) >> self.key_bits) as *const u8);
+        prefetch(self.line(Self::home_of(key, self.mult)) as *const u8);
     }
 
     fn memory_bytes(&self) -> usize {
@@ -859,8 +876,8 @@ impl SlotLocator for HashedKeys {
     fn from_sections(sections: &[Section], params: [u64; 4]) -> Self {
         let (keys, used, homes, start_bits) = (params[0], params[1], params[2], params[3] as u32);
         assert_eq!(sections[0].len(), (homes as usize + 32) * 64, "hashed key lines");
-        let tag_bits = bits_for((keys + homes - 1) / homes);
-        Self { keys, used, homes, key_bits: keys.trailing_zeros(), tag_bits, start_bits, lines: sections[0].clone() }
+        let (mult, tag_bits) = Self::mult_and_tag_bits(keys, homes);
+        Self { keys, used, homes, mult, tag_bits, start_bits, lines: sections[0].clone() }
     }
 }
 
@@ -922,10 +939,11 @@ impl<const C: usize, const F: usize, const T: usize> PackedFlexmap<CompactKeys, 
 }
 
 impl<const C: usize, const F: usize, const T: usize> PackedFlexmap<HashedKeys, C, F, T> {
-    /// The same index with a line-hashed key table; shares `compact`'s values (no copy).
+    /// The same index with a line-hashed key table over the same key space (a slice's is its
+    /// range); shares `compact`'s values (no copy).
     pub fn from_compact(compact: &PackedFlexmap<CompactKeys, C, F, T>) -> Option<Self> {
         let each_key = |f: &mut dyn FnMut(u64, u64, u64)| compact.keys.for_each_used(f);
-        let keys = HashedKeys::build(1u64 << (2 * C), compact.keys.used(), compact.values.total_slots, &each_key)?;
+        let keys = HashedKeys::build(compact.keys.keys, compact.keys.used(), compact.values.total_slots, &each_key)?;
         let values = PackedValues { layout: compact.values.layout, total_slots: compact.values.total_slots, data: compact.values.data.clone() };
         Some(Self { keys, values })
     }
@@ -1058,6 +1076,12 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         PackedFlexmap { keys, values }
     }
 
+    /// [`slice`](Self::slice) with a line-hashed key table over keys `0..hi - lo`; None if the
+    /// table's fields do not fit.
+    pub fn slice_hashed(&self, lo: u64, hi: u64) -> Option<PackedFlexmap<HashedKeys, C, F, T>> {
+        PackedFlexmap::<HashedKeys, C, F, T>::from_compact(&self.slice(lo, hi))
+    }
+
     /// Bytes of the key table and of the values.
     pub fn memory_bytes(&self) -> (usize, usize) {
         (self.keys.memory_bytes(), self.values.memory_bytes())
@@ -1183,6 +1207,37 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
 
 #[cfg(test)]
 mod tests {
+    /// Every used key of a key space that is not a power of two is found with its start and count,
+    /// and every other key is absent; a power-of-two space gets the homes `key * homes >> bits` did.
+    #[test]
+    fn hashed_keys_any_key_space() {
+        for keys in [1000u64, 4096, 999_983, 1 << 20] {
+            let used: Vec<u64> = (0..keys).filter(|k| k % 7 == 3 || k % 11 == 0).collect();
+            let each = |f: &mut dyn FnMut(u64, u64, u64)| {
+                for (i, &k) in used.iter().enumerate() {
+                    f(k, i as u64 * 3, 1 + (k % 5));
+                }
+            };
+            let t = HashedKeys::build(keys, used.len() as u64, used.len() as u64 * 3, &each).expect("fits");
+            let mut it = used.iter().peekable();
+            for k in 0..keys {
+                if it.peek() == Some(&&k) {
+                    let i = used.iter().position(|&u| u == k).unwrap() as u64;
+                    assert_eq!(t.locate(k), Some((i * 3, 1 + (k % 5))), "key {k} of {keys}");
+                    it.next();
+                } else {
+                    assert_eq!(t.locate(k), None, "key {k} of {keys}");
+                }
+            }
+            if keys.is_power_of_two() {
+                let bits = keys.trailing_zeros();
+                for k in (0..keys).step_by(97) {
+                    assert_eq!(HashedKeys::home_of(k, t.mult), (k * t.homes) >> bits);
+                }
+            }
+        }
+    }
+
     use std::cmp::min;
 
     use kmerrs::consecutive::kmer::{Kmer, KmerIter};
@@ -1299,6 +1354,22 @@ mod tests {
                             }
                         }
                         (a, b) => panic!("key {key}: whole {} slice {}", a.is_some(), b.is_some()),
+                    }
+                }
+            }
+            // Hashed slices: a key space of hi - lo, which is not a power of two.
+            for slice in [compact.slice_hashed(lo, hi).expect("fits"), hashed.slice_hashed(lo, hi).expect("fits")] {
+                for key in lo..hi {
+                    match (compact.get(key), slice.get(key - lo)) {
+                        (None, None) => {}
+                        (Some(a), Some(b)) => {
+                            assert_eq!((a.len(), a.has_header()), (b.len(), b.has_header()), "key {key}");
+                            assert_eq!(a.flex_bytes(), b.flex_bytes(), "key {key}: flank cells");
+                            for i in 0..a.len() {
+                                assert_eq!(a.get(i), b.get(i), "key {key}: value {i}");
+                            }
+                        }
+                        (a, b) => panic!("key {key}: whole {} hashed slice {}", a.is_some(), b.is_some()),
                     }
                 }
             }

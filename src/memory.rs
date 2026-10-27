@@ -174,6 +174,8 @@ impl SharedBytes {
 pub struct Section {
     ptr: *const u8,
     len: usize,
+    /// Bytes in memory: `len`, or fewer for a [`window`](Self::window).
+    resident: usize,
     _backing: Arc<Backing>,
 }
 
@@ -186,7 +188,7 @@ impl Section {
     pub fn from_words(words: Vec<u64>, len: usize) -> Self {
         assert!(len <= words.len() * 8);
         let backing = Arc::new(Backing::Words(words));
-        Self { ptr: backing.base(), len, _backing: backing }
+        Self { ptr: backing.base(), len, resident: len, _backing: backing }
     }
 
     pub(crate) fn backing(backing: Backing) -> Arc<Backing> {
@@ -196,7 +198,22 @@ impl Section {
     /// Bytes `[offset, offset + len)` of `backing`.
     pub(crate) fn view(backing: &Arc<Backing>, offset: usize, len: usize) -> Self {
         assert!(offset + len <= backing.len(), "section out of the file's bounds");
-        Self { ptr: unsafe { backing.base().add(offset) }, len, _backing: Arc::clone(backing) }
+        Self { ptr: unsafe { backing.base().add(offset) }, len, resident: len, _backing: Arc::clone(backing) }
+    }
+
+    /// A section `len` bytes long of which only bytes `[at, at + held.len())` are in memory, held
+    /// in `held`. [`ptr`](Self::ptr) is where the whole section would start, so offsets into the
+    /// whole section address the held bytes and code that reads the section needs no change; but
+    /// only offsets inside the held bytes may be read. A key range of an index read alone
+    /// ([`crate::packed::PackedFlexmap::read_window`]) is made of these.
+    pub fn window(held: &SharedBytes, at: usize, len: usize) -> Self {
+        assert!(at + held.len() <= len, "window {at}..{} past the section's {len} bytes", at + held.len());
+        Self { ptr: held.0.base().wrapping_sub(at), len, resident: held.len(), _backing: Arc::clone(&held.0) }
+    }
+
+    /// Bytes this section holds in memory: all of it, or a window's part.
+    pub fn resident(&self) -> usize {
+        self.resident
     }
 
     #[inline(always)]
@@ -210,6 +227,7 @@ impl Section {
     }
 
     pub fn bytes(&self) -> &[u8] {
+        assert_eq!(self.resident, self.len, "a window of a section is not all in memory");
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }

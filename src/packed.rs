@@ -29,6 +29,7 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::unix::fs::FileExt;
 use std::marker::PhantomData;
 
 use kmerrs::consecutive::kmer::Kmer;
@@ -308,7 +309,7 @@ pub struct PackedValues {
 impl PackedValues {
     /// The bytes the values take.
     pub fn memory_bytes(&self) -> usize {
-        self.data.len()
+        self.data.resident()
     }
 
     pub fn total_slots(&self) -> u64 {
@@ -324,10 +325,10 @@ impl PackedValues {
         let base = self.data.ptr();
         if slots > l.header_threshold as u64 {
             let flex_byte = ((bit + 7) >> 3) as usize;
-            let flex = unsafe { std::slice::from_raw_parts(base.add(flex_byte), 4 * n as usize) };
+            let flex = unsafe { std::slice::from_raw_parts(base.wrapping_add(flex_byte), 4 * n as usize) };
             PackedRange {
                 flex,
-                entries: unsafe { base.add(flex_byte + 4 * n as usize) },
+                entries: unsafe { base.wrapping_add(flex_byte + 4 * n as usize) },
                 entry_bit: 0,
                 len: n as usize,
                 entry_bits: l.entry_bits(),
@@ -337,7 +338,7 @@ impl PackedValues {
         } else {
             PackedRange {
                 flex: &[],
-                entries: unsafe { base.add((bit >> 3) as usize) },
+                entries: unsafe { base.wrapping_add((bit >> 3) as usize) },
                 entry_bit: bit & 7,
                 len: n as usize,
                 entry_bits: l.entry_bits(),
@@ -357,7 +358,7 @@ impl PackedValues {
         let mut b = first;
         let mut lines = 0;
         while b < end && lines < max_lines {
-            prefetch(unsafe { base.add(b) });
+            prefetch(unsafe { base.wrapping_add(b) });
             b += 64;
             lines += 1;
         }
@@ -466,6 +467,36 @@ pub trait SlotLocator: Send + Sync + Sized {
                 f(key, start, slots);
             }
         }
+    }
+    /// The key table as lookups of keys `[lo, hi)` read it, and nothing else of it: `read(i, from,
+    /// to)` gives bytes `[from, to)` of section `i` (of `lens[i]` bytes) as a [`Section::window`].
+    /// The result must only be asked for keys in `[lo, hi)`. By default the whole table is read.
+    fn read_window(
+        params: [u64; 4],
+        lens: &[usize],
+        lo: u64,
+        hi: u64,
+        read: &mut dyn FnMut(usize, usize, usize) -> std::io::Result<Section>,
+    ) -> std::io::Result<Self> {
+        let _ = (lo, hi);
+        let sections = (0..lens.len()).map(|i| read(i, 0, lens[i])).collect::<std::io::Result<Vec<_>>>()?;
+        Ok(Self::from_sections(&sections, params))
+    }
+    /// Cells `[from, to)` holding the values of keys `[lo, hi)` -- possibly a few more -- found from
+    /// what [`read_window`](Self::read_window) reads.
+    fn window_cells(&self, lo: u64, hi: u64) -> (u64, u64) {
+        let (mut from, mut to) = (u64::MAX, 0);
+        self.for_each_in(lo, hi, &mut |_, start, slots| {
+            from = from.min(start);
+            to = to.max(start + slots);
+        });
+        if from > to { (0, 0) } else { (from, to) }
+    }
+    /// `n + 1` non-decreasing keys from 0 to the key space, cutting it into `n` ranges whose values
+    /// take about equal cells (`total_slots / n`; a range may be empty).
+    fn split(&self, n: usize, total_slots: u64) -> Vec<u64> {
+        let _ = (n, total_slots);
+        unimplemented!("splitting a key table of kind {}", Self::KIND)
     }
 }
 
@@ -616,7 +647,7 @@ impl CompactKeys {
         let lines = (self.keys + Self::KEYS_PER_LINE - 1) / Self::KEYS_PER_LINE;
         let mut rank = 0u64;
         for line in 0..lines {
-            let p = unsafe { (self.lines.ptr() as *const u64).add(line as usize * 8) };
+            let p = unsafe { (self.lines.ptr() as *const u64).wrapping_add(line as usize * 8) };
             for w in 0..7u64 {
                 let mut bits = unsafe { *p.add(w as usize) };
                 while bits != 0 {
@@ -632,7 +663,7 @@ impl CompactKeys {
 
     #[inline(always)]
     fn line(&self, key: u64) -> *const u64 {
-        unsafe { (self.lines.ptr() as *const u64).add((key / Self::KEYS_PER_LINE * 8) as usize) }
+        unsafe { (self.lines.ptr() as *const u64).wrapping_add((key / Self::KEYS_PER_LINE * 8) as usize) }
     }
 
     /// The key's index among the used keys, if it is used.
@@ -653,10 +684,23 @@ impl CompactKeys {
         Some(rank + (word & ((1u64 << (i % 64)) - 1)).count_ones() as u64)
     }
 
+    /// The used keys before `line`, and the first rank past `line` (its own keys counted).
+    fn line_ranks(&self, line: u64) -> (u64, u64) {
+        let p = (self.lines.ptr() as *const u64).wrapping_add(line as usize * 8);
+        let before = unsafe { *p.add(7) };
+        (before, before + (0..7).map(|w| unsafe { *p.add(w) }.count_ones() as u64).sum::<u64>())
+    }
+
+    /// Ranks `[from, to]` whose starts keys `[lo, hi)` read: from the first key of `lo`'s line to the
+    /// end of `hi - 1`'s line.
+    fn window_ranks(&self, lo: u64, hi: u64) -> (u64, u64) {
+        (self.line_ranks(lo / Self::KEYS_PER_LINE).0, self.line_ranks((hi - 1) / Self::KEYS_PER_LINE).1)
+    }
+
     #[inline(always)]
     fn start(&self, rank: u64) -> u64 {
-        let base = unsafe { *(self.bases.ptr() as *const u64).add((rank / Self::GROUP) as usize) };
-        let off = unsafe { self.offsets.ptr().add(3 * rank as usize).cast::<u32>().read_unaligned() } & 0xFF_FFFF;
+        let base = unsafe { *(self.bases.ptr() as *const u64).wrapping_add((rank / Self::GROUP) as usize) };
+        let off = unsafe { self.offsets.ptr().wrapping_add(3 * rank as usize).cast::<u32>().read_unaligned() } & 0xFF_FFFF;
         base + off as u64
     }
 }
@@ -679,13 +723,13 @@ impl SlotLocator for CompactKeys {
     #[inline(always)]
     fn prefetch_key_second(&self, key: u64) {
         if let Some(rank) = self.rank(key) {
-            prefetch(unsafe { self.offsets.ptr().add(3 * rank as usize) });
-            prefetch(unsafe { self.bases.ptr().add(8 * (rank / Self::GROUP) as usize) });
+            prefetch(unsafe { self.offsets.ptr().wrapping_add(3 * rank as usize) });
+            prefetch(unsafe { self.bases.ptr().wrapping_add(8 * (rank / Self::GROUP) as usize) });
         }
     }
 
     fn memory_bytes(&self) -> usize {
-        self.lines.len() + self.bases.len() + self.offsets.len()
+        self.lines.resident() + self.bases.resident() + self.offsets.resident()
     }
 
     fn sections(&self) -> Vec<Section> {
@@ -705,6 +749,49 @@ impl SlotLocator for CompactKeys {
         Self { keys, used, lines: sections[0].clone(), bases: sections[1].clone(), offsets: sections[2].clone() }
     }
 
+    /// The lines of keys `[lo, hi)`, then the bases and offsets of their ranks.
+    fn read_window(
+        params: [u64; 4],
+        lens: &[usize],
+        lo: u64,
+        hi: u64,
+        read: &mut dyn FnMut(usize, usize, usize) -> std::io::Result<Section>,
+    ) -> std::io::Result<Self> {
+        assert!(lo < hi && hi <= params[0], "key range {lo}..{hi} of {}", params[0]);
+        let (first, last) = (lo / Self::KEYS_PER_LINE, (hi - 1) / Self::KEYS_PER_LINE);
+        let lines = read(0, first as usize * 64, (last as usize + 1) * 64)?;
+        let empty = Section::from_words(Vec::new(), 0);
+        let partial = Self { keys: params[0], used: params[1], lines: lines.clone(), bases: empty.clone(), offsets: empty };
+        let (r_lo, r_hi) = partial.window_ranks(lo, hi);
+        let bases = read(1, 8 * (r_lo / Self::GROUP) as usize, (8 * (r_hi / Self::GROUP + 1) as usize).min(lens[1]))?;
+        // `start` reads 4 bytes at 3 * rank.
+        let offsets = read(2, 3 * r_lo as usize, (3 * r_hi as usize + 8).min(lens[2]))?;
+        Ok(Self::from_sections(&[lines, bases, offsets], params))
+    }
+
+    fn window_cells(&self, lo: u64, hi: u64) -> (u64, u64) {
+        let (r_lo, r_hi) = self.window_ranks(lo, hi);
+        (self.start(r_lo), self.start(r_hi))
+    }
+
+    /// At line boundaries: a line's first cell is the start of the rank before it, and starts grow
+    /// with the line.
+    fn split(&self, n: usize, total_slots: u64) -> Vec<u64> {
+        let lines = (self.keys + Self::KEYS_PER_LINE - 1) / Self::KEYS_PER_LINE;
+        let mut bounds = vec![0u64];
+        for i in 1..n as u64 {
+            let target = (total_slots as u128 * i as u128 / n as u128) as u64;
+            let (mut a, mut b) = (0u64, lines);
+            while a < b {
+                let m = a + (b - a) / 2;
+                if self.start(self.line_ranks(m).0) < target { a = m + 1 } else { b = m }
+            }
+            bounds.push((a * Self::KEYS_PER_LINE).min(self.keys).max(*bounds.last().unwrap()));
+        }
+        bounds.push(self.keys);
+        bounds
+    }
+
     fn for_each_in(&self, lo: u64, hi: u64, f: &mut dyn FnMut(u64, u64, u64)) {
         let hi = hi.min(self.keys);
         if lo >= hi {
@@ -713,7 +800,7 @@ impl SlotLocator for CompactKeys {
         let first = lo / Self::KEYS_PER_LINE;
         let last = (hi - 1) / Self::KEYS_PER_LINE;
         for line in first..=last {
-            let p = unsafe { (self.lines.ptr() as *const u64).add(line as usize * 8) };
+            let p = unsafe { (self.lines.ptr() as *const u64).wrapping_add(line as usize * 8) };
             let mut rank = unsafe { *p.add(7) };
             for w in 0..7u64 {
                 let mut bits = unsafe { *p.add(w as usize) };
@@ -826,7 +913,7 @@ impl HashedKeys {
 
     #[inline(always)]
     fn line(&self, index: u64) -> *const u64 {
-        unsafe { (self.lines.ptr() as *const u64).add((index * Self::ENTRIES) as usize) }
+        unsafe { (self.lines.ptr() as *const u64).wrapping_add((index * Self::ENTRIES) as usize) }
     }
 }
 
@@ -862,7 +949,7 @@ impl SlotLocator for HashedKeys {
     }
 
     fn memory_bytes(&self) -> usize {
-        self.lines.len()
+        self.lines.resident()
     }
 
     fn sections(&self) -> Vec<Section> {
@@ -878,6 +965,100 @@ impl SlotLocator for HashedKeys {
         assert_eq!(sections[0].len(), (homes as usize + 32) * 64, "hashed key lines");
         let (mult, tag_bits) = Self::mult_and_tag_bits(keys, homes);
         Self { keys, used, homes, mult, tag_bits, start_bits, lines: sections[0].clone() }
+    }
+
+    /// The lines a lookup of keys `[lo, hi)` reads: from `lo`'s home to 31 lines past `hi - 1`'s.
+    fn read_window(
+        params: [u64; 4],
+        _lens: &[usize],
+        lo: u64,
+        hi: u64,
+        read: &mut dyn FnMut(usize, usize, usize) -> std::io::Result<Section>,
+    ) -> std::io::Result<Self> {
+        assert!(lo < hi && hi <= params[0], "key range {lo}..{hi} of {}", params[0]);
+        let (first, last) = Self::window_lines(params[0], params[2], lo, hi);
+        let lines = read(0, first as usize * 64, last as usize * 64)?;
+        Ok(Self::from_sections(&[lines], params))
+    }
+
+    /// The entries of the lines whose home is that of a key in `[lo, hi)`.
+    fn window_cells(&self, lo: u64, hi: u64) -> (u64, u64) {
+        let (first, last) = Self::window_lines(self.keys, self.homes, lo, hi);
+        let (h_lo, h_hi) = (Self::home_of(lo, self.mult), Self::home_of(hi - 1, self.mult));
+        let (mut from, mut to) = (u64::MAX, 0);
+        for line in first..last {
+            self.each_entry(line, &mut |home, start, slots| {
+                if home >= h_lo && home <= h_hi {
+                    from = from.min(start);
+                    to = to.max(start + slots);
+                }
+            });
+        }
+        if from > to { (0, 0) } else { (from, to) }
+    }
+
+    /// At home boundaries: a key range is then the keys of a run of homes, and the first cell of a
+    /// home grows with the home (keys go in key order). One pass over the lines.
+    fn split(&self, n: usize, total_slots: u64) -> Vec<u64> {
+        // first[h]: the least first cell of the homes from h on.
+        let mut first = vec![u64::MAX; self.homes as usize + 1];
+        first[self.homes as usize] = total_slots;
+        for line in 0..self.homes + 32 {
+            self.each_entry(line, &mut |home, start, _| {
+                let f = &mut first[home as usize];
+                *f = (*f).min(start);
+            });
+        }
+        for h in (0..self.homes as usize).rev() {
+            first[h] = first[h].min(first[h + 1]);
+        }
+        let mut bounds = vec![0u64];
+        for i in 1..n as u64 {
+            let target = (total_slots as u128 * i as u128 / n as u128) as u64;
+            let home = first.partition_point(|&f| f < target) as u64;
+            bounds.push(self.first_key_of(home).max(*bounds.last().unwrap()));
+        }
+        bounds.push(self.keys);
+        bounds
+    }
+}
+
+impl HashedKeys {
+    /// Lines `[first, last)` that lookups of keys `[lo, hi)` read.
+    fn window_lines(keys: u64, homes: u64, lo: u64, hi: u64) -> (u64, u64) {
+        let (mult, _) = Self::mult_and_tag_bits(keys, homes);
+        (Self::home_of(lo, mult), (Self::home_of(hi - 1, mult) + 32).min(homes + 32))
+    }
+
+    /// The least key homed at `home` or later (the key space past the last home).
+    fn first_key_of(&self, home: u64) -> u64 {
+        if home >= self.homes {
+            return self.keys;
+        }
+        // The least k with k * mult >> 64 >= home: ceil(home * 2^64 / mult), corrected for rounding.
+        let mut k = ((((home as u128) << 64) + self.mult as u128 - 1) / self.mult as u128) as u64;
+        while k > 0 && Self::home_of(k - 1, self.mult) >= home {
+            k -= 1;
+        }
+        while Self::home_of(k, self.mult) < home {
+            k += 1;
+        }
+        k.min(self.keys)
+    }
+
+    /// Calls `f(home, first cell, cells)` for every entry of `line`.
+    fn each_entry(&self, line: u64, f: &mut dyn FnMut(u64, u64, u64)) {
+        let p = self.line(line);
+        let low = self.tag_bits + Self::DISP_BITS;
+        for i in 0..Self::ENTRIES as usize {
+            let e = unsafe { *p.add(i) } & !Self::OVERFLOW;
+            if e == 0 {
+                continue;
+            }
+            let disp = (e >> self.tag_bits) & ((1 << Self::DISP_BITS) - 1);
+            let start = (e >> low) & ((1u64 << self.start_bits) - 1);
+            f(line - disp, start, (e >> (low + self.start_bits)) & ((1 << Self::COUNT_BITS) - 1));
+        }
     }
 }
 
@@ -1143,8 +1324,19 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
 
     fn from_bytes_at(bytes: &SharedBytes, base: usize) -> Self {
         let all = bytes.section(base, PACKED_ALIGN);
-        let mut r = HeaderReader(all.bytes(), 8);
-        assert!(all.bytes()[..8] == PACKED_MAGIC, "not a packed flexmap");
+        let (layout, total_slots, params, extents) = Self::parse_header(all.bytes());
+        let count = extents.len();
+        let sections: Vec<Section> = extents.iter().map(|&(offset, len)| bytes.section(base + offset, len)).collect();
+        let data = sections[count - 1].clone();
+        assert!(data.len() as u64 >= ((layout.slot_bit(total_slots) + 7) >> 3) + VALUE_PADDING as u64, "values truncated");
+        Self { keys: K::from_sections(&sections[..count - 1], params), values: PackedValues { layout, total_slots, data } }
+    }
+
+    /// The layout, cell count, key-table parameters and (offset, length) of every section, from a
+    /// packed flexmap's first PACKED_ALIGN bytes.
+    fn parse_header(head: &[u8]) -> (PackedLayout, u64, [u64; 4], Vec<(usize, usize)>) {
+        let mut r = HeaderReader(head, 8);
+        assert!(head[..8] == PACKED_MAGIC, "not a packed flexmap");
         assert_eq!(r.u32(), PACKED_VERSION, "packed flexmap version");
         assert!(
             r.u32() == C as u32 && r.u32() == F as u32 && r.u32() == T as u32,
@@ -1156,16 +1348,57 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         let slot_bits32 = r.u64();
         let total_slots = r.u64();
         let params = [r.u64(), r.u64(), r.u64(), r.u64()];
-        let sections: Vec<Section> = (0..count)
-            .map(|_| {
-                let (offset, len) = (r.u64() as usize, r.u64() as usize);
-                bytes.section(base + offset, len)
-            })
-            .collect();
-        let layout = PackedLayout { ref_bits, pos_bits, header_threshold: T as u32, slot_bits32 };
-        let data = sections[count - 1].clone();
-        assert!(data.len() as u64 >= ((layout.slot_bit(total_slots) + 7) >> 3) + VALUE_PADDING as u64, "values truncated");
-        Self { keys: K::from_sections(&sections[..count - 1], params), values: PackedValues { layout, total_slots, data } }
+        let extents = (0..count).map(|_| (r.u64() as usize, r.u64() as usize)).collect();
+        (PackedLayout { ref_bits, pos_bits, header_threshold: T as u32, slot_bits32 }, total_slots, params, extents)
+    }
+
+    /// The header of the index written at `offset` of `file`, and its key table read whole.
+    fn read_keys(file: &File, offset: u64, threads: usize) -> std::io::Result<(K, PackedLayout, u64, Vec<(usize, usize)>)> {
+        let mut head = vec![0u8; PACKED_ALIGN];
+        file.read_exact_at(&mut head, offset)?;
+        let (layout, total_slots, params, extents) = Self::parse_header(&head);
+        let mut sections = Vec::new();
+        for &(at, len) in &extents[..extents.len() - 1] {
+            sections.push(SharedBytes::read(file, offset + at as u64, len, threads)?.section(0, len));
+        }
+        Ok((K::from_sections(&sections, params), layout, total_slots, extents))
+    }
+
+    /// The keys `[lo, hi)` of the index written at `offset` of `file` (a multiple of 4096: a
+    /// bundle's index section, or 0 for an index file of its own), read alone: of the key table
+    /// the part their lookups read, of the values the cells their keys hold, each in one read on
+    /// `threads` threads into huge pages. Nothing is rewritten or copied: the parts keep the whole
+    /// index's addressing ([`Section::window`]), so `get(k)` answers as the whole index for every
+    /// `k` in `[lo, hi)`, through the same code. It must not be asked for other keys.
+    pub fn read_window(file: &File, offset: u64, lo: u64, hi: u64, threads: usize) -> std::io::Result<Self> {
+        let mut head = vec![0u8; PACKED_ALIGN];
+        file.read_exact_at(&mut head, offset)?;
+        let (layout, total_slots, params, extents) = Self::parse_header(&head);
+        let count = extents.len();
+        let mut read = |i: usize, from: usize, to: usize| -> std::io::Result<Section> {
+            let (at, len) = extents[i];
+            let to = to.min(len);
+            let from = from.min(to);
+            let held = SharedBytes::read(file, offset + (at + from) as u64, to - from, threads)?;
+            Ok(Section::window(&held, from, len))
+        };
+        let lens: Vec<usize> = extents[..count - 1].iter().map(|e| e.1).collect();
+        let keys = K::read_window(params, &lens, lo, hi, &mut |i, from, to| read(i, from, to))?;
+        let (first, last) = keys.window_cells(lo, hi);
+        // The values of cells [first, last), as `range` reads them: from the 8-byte word holding
+        // the first cell's first bit to VALUE_PADDING bytes past the last cell (unaligned reads).
+        let from = (layout.slot_bit(first) >> 3) as usize & !7;
+        let to = ((layout.slot_bit(last) + 7) >> 3) as usize + VALUE_PADDING;
+        let data = read(count - 1, from, to)?;
+        Ok(Self { keys, values: PackedValues { layout, total_slots, data } })
+    }
+
+    /// `n + 1` non-decreasing keys cutting the index at `offset` of `file` into `n` key ranges of
+    /// about equal value bytes, for [`read_window`](Self::read_window). Reads only the key table.
+    pub fn split_in_file(file: &File, offset: u64, n: usize, threads: usize) -> std::io::Result<Vec<u64>> {
+        assert!(n > 0, "need at least one part");
+        let (keys, _, total_slots, _) = Self::read_keys(file, offset, threads)?;
+        Ok(keys.split(n, total_slots))
     }
 
     /// Reads the file into a huge-page buffer on `threads` threads.
@@ -1383,6 +1616,59 @@ mod tests {
         assert_eq!(total, compact.values.total_slots(), "the slices partition the cells");
         let empty = compact.slice(5, 5);
         assert_eq!((empty.keys.used(), empty.values.total_slots()), (0, 0));
+    }
+
+    /// Windows read from a file (at an offset, as inside a bundle) answer as the whole index for
+    /// every key of their range, for both key tables; the split covers the key space in order and
+    /// the windows hold less than the whole.
+    #[test]
+    fn windows_answer_as_the_whole_index() {
+        fn check<K: SlotLocator>(whole: &PackedFlexmap<K, 6, 8, 2>, name: &str) {
+            let path = std::env::temp_dir().join(format!("flexmap-window-{}-{name}", std::process::id()));
+            let offset = 3 * 4096u64;
+            {
+                let mut f = std::io::BufWriter::new(File::create(&path).unwrap());
+                f.write_all(&vec![7u8; offset as usize]).unwrap();
+                whole.write_to(&mut f).unwrap();
+                f.flush().unwrap();
+            }
+            let file = File::open(&path).unwrap();
+            let keys = 1u64 << 12;
+            for n in [1usize, 2, 3, 7] {
+                let bounds = PackedFlexmap::<K, 6, 8, 2>::split_in_file(&file, offset, n, 2).unwrap();
+                assert_eq!((bounds.len(), bounds[0], bounds[n]), (n + 1, 0, keys), "{name} {n}: {bounds:?}");
+                assert!(bounds.windows(2).all(|w| w[0] <= w[1]), "{name} {n}: {bounds:?}");
+                for w in bounds.windows(2) {
+                    let (lo, hi) = (w[0], w[1]);
+                    if lo == hi {
+                        continue;
+                    }
+                    let part = PackedFlexmap::<K, 6, 8, 2>::read_window(&file, offset, lo, hi, 2).unwrap();
+                    if n > 1 {
+                        assert!(part.values.memory_bytes() < whole.values.memory_bytes(), "{name} {n}: window holds all values");
+                    }
+                    for key in lo..hi {
+                        match (whole.get(key), part.get(key)) {
+                            (None, None) => {}
+                            (Some(a), Some(b)) => {
+                                assert_eq!((a.len(), a.has_header()), (b.len(), b.has_header()), "{name} key {key}");
+                                assert_eq!(a.flex_bytes(), b.flex_bytes(), "{name} key {key}: flank cells");
+                                for i in 0..a.len() {
+                                    assert_eq!(a.get(i), b.get(i), "{name} key {key}: value {i}");
+                                }
+                            }
+                            (a, b) => panic!("{name} key {key}: whole {} window {}", a.is_some(), b.is_some()),
+                        }
+                    }
+                }
+            }
+            std::fs::remove_file(&path).unwrap();
+        }
+        let flexmap = random_flexmap();
+        let compact = PackedFlexmap::<CompactKeys, 6, 8, 2>::from_flexmap(&flexmap);
+        let hashed = PackedFlexmap::<HashedKeys, 6, 8, 2>::from_compact(&compact).expect("hashed table fits");
+        check(&compact, "compact");
+        check(&hashed, "hashed");
     }
 
     #[test]

@@ -301,12 +301,24 @@ impl<const VAL_BITS: usize, const POS_BITS: usize> VData<VAL_BITS, POS_BITS> {
     }
 }
 
+/// A value cell's uniqueness flags ([`crate::uniqueness`]) sit in its two top bits, above the 62
+/// bits of a `VD` value, so `VD::get` never sees them.
+pub const FLAG_SHIFT: u32 = 62;
+/// The bits of a cell below the flags.
+pub const CELL_VALUE_MASK: u64 = (1 << FLAG_SHIFT) - 1;
+
 #[derive(Clone, Copy, Savefile, ser_raw::Serialize, Encode, Decode, Zeroable, Pod)]
 #[repr(C)]
 pub struct VCell(pub u64);
 
 impl VCell {
     const MASK: u64 = (1 << 60) - 1;
+
+    /// The uniqueness flags (0 for an index built without the uniqueness pass).
+    #[inline(always)]
+    pub fn flags(&self) -> u8 {
+        (self.0 >> FLAG_SHIFT) as u8
+    }
 
     pub fn set_raw(&mut self, value: u64) {
         self.0 = value;
@@ -339,6 +351,12 @@ pub struct VRangeMut<'a> {
 impl<'a> VRange<'a> {
     pub fn new(header: Option<&'a [HeaderSeq]>, positions: &'a [VCell]) -> Self {
         Self { header, positions }
+    }
+
+    /// The uniqueness flags of value `i` ([`crate::uniqueness`]).
+    #[inline(always)]
+    pub fn flags(&self, i: usize) -> u8 {
+        self.positions[i].flags()
     }
 }
 

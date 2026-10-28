@@ -19,6 +19,7 @@ pub mod example;
 pub mod memory;
 pub mod packed;
 pub mod range;
+pub mod uniqueness;
 
 
 #[macro_use]

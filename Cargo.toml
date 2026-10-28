@@ -27,6 +27,8 @@ fxhash = "0.2.1"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 memmap2 = "0.9"
 libc = "0.2"
+# Gzipped genomes for the uniqueness pass (bioreader already pulls it in).
+flate2 = "1.0.28"
 
 [profile.release]
 opt-level = 3               # Use best optimizations

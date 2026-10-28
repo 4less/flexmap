@@ -4,7 +4,7 @@
 use kmerrs::consecutive::kmer::Kmer;
 
 use crate::packed::{flank_distance, PackedRange};
-use crate::values::VRange;
+use crate::values::{VRange, CELL_VALUE_MASK};
 use crate::VD;
 
 /// A key's values from either index.
@@ -54,15 +54,24 @@ impl<'a> AnyRange<'a> {
         }
     }
 
-    /// Value `i` as a Flexmap cell (`VD::set` of it, as `VCell::set` stores it).
+    /// Value `i` as a Flexmap cell (`VD::set` of it, as `VCell::set` stores it), without its flags.
     #[inline(always)]
     pub fn cell(&self, i: usize) -> u64 {
         match self {
-            AnyRange::Plain(r) => r.positions[i].0,
+            AnyRange::Plain(r) => r.positions[i].0 & CELL_VALUE_MASK,
             AnyRange::Packed(r) => {
                 let (value, pos) = r.get(i);
                 VD::set(value, pos) & ((1 << 60) - 1)
             }
+        }
+    }
+
+    /// The uniqueness flags of value `i` ([`crate::uniqueness`]; 0 for an index without them).
+    #[inline(always)]
+    pub fn flags(&self, i: usize) -> u8 {
+        match self {
+            AnyRange::Plain(r) => r.flags(i),
+            AnyRange::Packed(r) => r.flags(i),
         }
     }
 

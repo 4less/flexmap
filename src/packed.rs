@@ -13,6 +13,9 @@
 //!    where `slot_bits32 / 32` is the least number of bits per cell that holds every key's flank
 //!    cells and values (32 + W bits a value for a key with a header, which has at most 2/3 of a
 //!    value per cell; W for a key without). The key table's offsets are therefore unchanged.
+//!    An index with uniqueness flags ([`crate::uniqueness`]) stores them in `flag_bits` (2) above each
+//!    value, so W = `ref_bits + pos_bits + flag_bits`; a value is still read as its low
+//!    `ref_bits + pos_bits` bits, and an index without flags is laid out and saved as before.
 //!    A header key's flank cells start at the next byte (so they read as plain `u32`s), then its
 //!    values; each value can be read on its own.
 //!  - [`CompactKeys`]: the key table of the used keys alone (a rank structure: a presence bit per
@@ -69,6 +72,9 @@ fn put_bits(words: &mut [u64], bit: u64, x: u64, w: u32) {
     }
 }
 
+/// The flag bits an index with uniqueness flags stores above each value.
+pub const FLAG_BITS: u32 = 2;
+
 /// Number of bits needed for `x` (at least 1).
 fn bits_for(x: u64) -> u32 {
     (64 - x.leading_zeros()).max(1)
@@ -79,6 +85,8 @@ fn bits_for(x: u64) -> u32 {
 pub struct PackedLayout {
     pub ref_bits: u32,
     pub pos_bits: u32,
+    /// Uniqueness flag bits above each value: 0 (none) or [`FLAG_BITS`].
+    pub flag_bits: u32,
     pub header_threshold: u32,
     /// Bits per cell, in 1/32 bit.
     pub slot_bits32: u64,
@@ -86,11 +94,12 @@ pub struct PackedLayout {
 
 impl PackedLayout {
     /// The layout for values of reference ids up to `max_ref`, positions up to `max_pos` and keys of
-    /// up to `max_slots` cells.
-    pub fn new(max_ref: u64, max_pos: u64, max_slots: u64, header_threshold: usize) -> Self {
+    /// up to `max_slots` cells, with `flag_bits` (0 or [`FLAG_BITS`]) of flags above each value.
+    pub fn new(max_ref: u64, max_pos: u64, max_slots: u64, header_threshold: usize, flag_bits: u32) -> Self {
+        assert!(flag_bits == 0 || flag_bits == FLAG_BITS, "flag bits {flag_bits}");
         let ref_bits = bits_for(max_ref);
         let pos_bits = bits_for(max_pos);
-        let w = (ref_bits + pos_bits) as u64;
+        let w = (ref_bits + pos_bits + flag_bits) as u64;
         assert!(w <= 64, "a value needs {w} bits");
         let t = header_threshold as u64;
         // A key without a header: S = n values in S cells.
@@ -108,11 +117,18 @@ impl PackedLayout {
             slot_bits32 = slot_bits32.max((need + s - 1) / s);
             n += 1;
         }
-        Self { ref_bits, pos_bits, header_threshold: header_threshold as u32, slot_bits32 }
+        Self { ref_bits, pos_bits, flag_bits, header_threshold: header_threshold as u32, slot_bits32 }
     }
 
+    /// Bits a stored value takes: its value bits and its flags.
     #[inline(always)]
     pub fn entry_bits(&self) -> u32 {
+        self.ref_bits + self.pos_bits + self.flag_bits
+    }
+
+    /// Bits of a value without its flags: `(reference id << pos_bits) | position`.
+    #[inline(always)]
+    pub fn value_bits(&self) -> u32 {
         self.ref_bits + self.pos_bits
     }
 
@@ -142,8 +158,11 @@ pub struct PackedRange<'a> {
     entries: *const u8,
     entry_bit: u64,
     len: usize,
+    /// Bits from one value to the next (value and flags).
     entry_bits: u32,
-    pos_bits: u32,
+    /// Bits of a value without its flags (the low bits of an entry).
+    value_bits: u16,
+    pos_bits: u16,
     _bytes: PhantomData<&'a u8>,
 }
 
@@ -192,7 +211,7 @@ impl<'a> PackedRange<'a> {
     #[inline(always)]
     pub fn get(&self, i: usize) -> (u64, u64) {
         assert!(i < self.len);
-        let e = unsafe { read_bits(self.entries, self.entry_bit + i as u64 * self.entry_bits as u64, self.entry_bits) };
+        let e = unsafe { read_bits(self.entries, self.entry_bit + i as u64 * self.entry_bits as u64, self.value_bits as u32) };
         (e >> self.pos_bits, e & ((1u64 << self.pos_bits) - 1))
     }
 
@@ -200,15 +219,27 @@ impl<'a> PackedRange<'a> {
     #[inline(always)]
     fn get_narrow(&self, i: usize) -> (u64, u64) {
         let bit = self.entry_bit + i as u64 * self.entry_bits as u64;
-        let mask = u64::MAX >> (64 - self.entry_bits);
+        let mask = u64::MAX >> (64 - self.value_bits as u32);
         let e = unsafe { (self.entries.add((bit >> 3) as usize).cast::<u64>().read_unaligned() >> (bit & 7)) & mask };
         (e >> self.pos_bits, e & ((1u64 << self.pos_bits) - 1))
+    }
+
+    /// The uniqueness flags of value `i` (< len; [`crate::uniqueness`]), 0 for an index without them.
+    #[inline(always)]
+    pub fn flags(&self, i: usize) -> u8 {
+        assert!(i < self.len);
+        let flag_bits = self.entry_bits - self.value_bits as u32;
+        if flag_bits == 0 {
+            return 0;
+        }
+        let bit = self.entry_bit + i as u64 * self.entry_bits as u64 + self.value_bits as u64;
+        unsafe { read_bits(self.entries, bit, flag_bits) as u8 }
     }
 
     /// Calls `f(i, value i)` for every value, with the width test outside the loop.
     #[inline(always)]
     fn for_each_value<L: FnMut(usize, (u64, u64))>(&self, mut f: L) {
-        if self.entry_bits <= 57 {
+        if self.value_bits <= 57 {
             for i in 0..self.len {
                 f(i, self.get_narrow(i));
             }
@@ -249,7 +280,7 @@ impl<'a> PackedRange<'a> {
             }
             let min_dist = *dist.iter().min().unwrap();
             let count = dist.iter().filter(|&&d| d == min_dist).count() as u32;
-            let narrow = self.entry_bits <= 57;
+            let narrow = self.value_bits <= 57;
             for (i, &d) in dist.iter().enumerate() {
                 if d == min_dist {
                     let (value, rpos) = if narrow { self.get_narrow(i) } else { self.get(i) };
@@ -262,7 +293,7 @@ impl<'a> PackedRange<'a> {
             for (i, c) in self.flex.chunks_exact(4).enumerate() {
                 let dist = flank_distance(u32::from_le_bytes([c[0], c[1], c[2], c[3]]), q);
                 if dist == min_dist {
-                    let (value, rpos) = if self.entry_bits <= 57 { self.get_narrow(i) } else { self.get(i) };
+                    let (value, rpos) = if self.value_bits <= 57 { self.get_narrow(i) } else { self.get(i) };
                     lambda(rpos, value, Some((dist, count)));
                 }
             }
@@ -332,7 +363,8 @@ impl PackedValues {
                 entry_bit: 0,
                 len: n as usize,
                 entry_bits: l.entry_bits(),
-                pos_bits: l.pos_bits,
+                value_bits: l.value_bits() as u16,
+                pos_bits: l.pos_bits as u16,
                 _bytes: PhantomData,
             }
         } else {
@@ -342,7 +374,8 @@ impl PackedValues {
                 entry_bit: bit & 7,
                 len: n as usize,
                 entry_bits: l.entry_bits(),
-                pos_bits: l.pos_bits,
+                value_bits: l.value_bits() as u16,
+                pos_bits: l.pos_bits as u16,
                 _bytes: PhantomData,
             }
         }
@@ -368,6 +401,7 @@ impl PackedValues {
     fn from_cells<const T: usize>(cells: &[VCell], each_key: &dyn Fn(&mut dyn FnMut(u64, u64, u64))) -> Self {
         // Pass 1: the widths.
         let (mut max_ref, mut max_pos, mut max_slots) = (0u64, 0u64, 0u64);
+        let mut flagged = false;
         each_key(&mut |_key, start, slots| {
             max_slots = max_slots.max(slots);
             let h = if slots > T as u64 { (slots + 2) / 3 } else { 0 };
@@ -375,9 +409,13 @@ impl PackedValues {
                 let (val, pos) = VD::get(c.0);
                 max_ref = max_ref.max(val);
                 max_pos = max_pos.max(pos);
+                flagged |= c.flags() != 0;
             }
         });
-        let layout = PackedLayout::new(max_ref, max_pos, max_slots.max(1), T);
+        // Flags are stored when any cell has one, that is when the uniqueness pass ran (and found any
+        // value unique).
+        let flag_bits = if flagged { FLAG_BITS } else { 0 };
+        let layout = PackedLayout::new(max_ref, max_pos, max_slots.max(1), T, flag_bits);
         let total_slots = cells.len() as u64;
         let bytes = ((layout.slot_bit(total_slots) + 7) >> 3) as usize + VALUE_PADDING;
         let mut words = zeroed_words((bytes + 7) / 8);
@@ -401,7 +439,8 @@ impl PackedValues {
             };
             for (i, c) in values.iter().enumerate() {
                 let (val, pos) = VD::get(c.0);
-                put_bits(&mut words, entry_bit + i as u64 * w as u64, (val << layout.pos_bits) | pos, w);
+                let flags = if flag_bits == 0 { 0 } else { (c.flags() as u64) << layout.value_bits() };
+                put_bits(&mut words, entry_bit + i as u64 * w as u64, flags | (val << layout.pos_bits) | pos, w);
             }
             debug_assert!(entry_bit + n * w as u64 <= layout.slot_bit(start + slots));
         });
@@ -435,7 +474,8 @@ impl PackedValues {
             };
             for i in 0..n {
                 let (val, pos) = range.get(i as usize);
-                put_bits(&mut words, entry_bit + i * w as u64, (val << layout.pos_bits) | pos, w);
+                let flags = (range.flags(i as usize) as u64) << layout.value_bits();
+                put_bits(&mut words, entry_bit + i * w as u64, flags | (val << layout.pos_bits) | pos, w);
             }
             debug_assert!(entry_bit + n * w as u64 <= layout.slot_bit(start + slots));
             start += slots;
@@ -1063,7 +1103,10 @@ impl HashedKeys {
 }
 
 const PACKED_MAGIC: [u8; 8] = *b"FMPACK01";
-const PACKED_VERSION: u32 = 1;
+/// Version 2 adds `flag_bits` after `pos_bits`; an index without flags is still written as version 1,
+/// so it stays byte for byte what it was.
+const PACKED_VERSION: u32 = 2;
+const PACKED_VERSION_NO_FLAGS: u32 = 1;
 /// Header bytes; the sections follow, each at a multiple of this (page-aligned).
 const PACKED_ALIGN: usize = 4096;
 
@@ -1078,7 +1121,7 @@ pub type PackedFlexmapStd = PackedFlexmap<CompactKeys, 15, 16, 2>;
 /// Lists a Flexmap's keys with values in key order, as (key, first cell, cells).
 /// Lists the keys with values of a Flexmap key table (its cells, as FMKeys or a blob hold them) in key
 /// order, as (key, first cell, cells).
-fn table_keys<const C: usize, const CPB: u64>(cells: &[KCell]) -> impl Fn(&mut dyn FnMut(u64, u64, u64)) + '_ {
+pub(crate) fn table_keys<const C: usize, const CPB: u64>(cells: &[KCell]) -> impl Fn(&mut dyn FnMut(u64, u64, u64)) + '_ {
     assert_eq!(cells.len() as u64, FMKeys::<C, CPB>::table_size(), "key table of other C or CPB");
     let head = |i: u64| -> u64 { (0..4).map(|j| (cells[(i + j) as usize].0 as u64) << (16 * j)).fold(0, |a, b| a | b) };
     move |f: &mut dyn FnMut(u64, u64, u64)| {
@@ -1263,6 +1306,11 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         PackedFlexmap::<HashedKeys, C, F, T>::from_compact(&self.slice(lo, hi))
     }
 
+    /// Whether the values carry uniqueness flags ([`crate::uniqueness`]).
+    pub fn has_flags(&self) -> bool {
+        self.values.layout.flag_bits != 0
+    }
+
     /// Bytes of the key table and of the values.
     pub fn memory_bytes(&self) -> (usize, usize) {
         (self.keys.memory_bytes(), self.values.memory_bytes())
@@ -1283,8 +1331,12 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         let l = &self.values.layout;
         let mut header = Vec::new();
         header.extend_from_slice(&PACKED_MAGIC);
-        for x in [PACKED_VERSION, C as u32, F as u32, T as u32, K::KIND, sections.len() as u32, l.ref_bits, l.pos_bits] {
+        let version = if l.flag_bits == 0 { PACKED_VERSION_NO_FLAGS } else { PACKED_VERSION };
+        for x in [version, C as u32, F as u32, T as u32, K::KIND, sections.len() as u32, l.ref_bits, l.pos_bits] {
             put_u32(&mut header, x);
+        }
+        if version >= 2 {
+            put_u32(&mut header, l.flag_bits);
         }
         put_u64(&mut header, l.slot_bits32);
         put_u64(&mut header, self.values.total_slots);
@@ -1337,7 +1389,8 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
     fn parse_header(head: &[u8]) -> (PackedLayout, u64, [u64; 4], Vec<(usize, usize)>) {
         let mut r = HeaderReader(head, 8);
         assert!(head[..8] == PACKED_MAGIC, "not a packed flexmap");
-        assert_eq!(r.u32(), PACKED_VERSION, "packed flexmap version");
+        let version = r.u32();
+        assert!(version == PACKED_VERSION || version == PACKED_VERSION_NO_FLAGS, "packed flexmap version {version}");
         assert!(
             r.u32() == C as u32 && r.u32() == F as u32 && r.u32() == T as u32,
             "packed flexmap of other C, F or HEADER_THRESHOLD"
@@ -1345,11 +1398,12 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         assert_eq!(r.u32(), K::KIND, "packed flexmap of another key table");
         let count = r.u32() as usize;
         let (ref_bits, pos_bits) = (r.u32(), r.u32());
+        let flag_bits = if version >= 2 { r.u32() } else { 0 };
         let slot_bits32 = r.u64();
         let total_slots = r.u64();
         let params = [r.u64(), r.u64(), r.u64(), r.u64()];
         let extents = (0..count).map(|_| (r.u64() as usize, r.u64() as usize)).collect();
-        (PackedLayout { ref_bits, pos_bits, header_threshold: T as u32, slot_bits32 }, total_slots, params, extents)
+        (PackedLayout { ref_bits, pos_bits, flag_bits, header_threshold: T as u32, slot_bits32 }, total_slots, params, extents)
     }
 
     /// The header of the index written at `offset` of `file`, and its key table read whole.
@@ -1430,7 +1484,7 @@ impl<K: SlotLocator, const C: usize, const F: usize, const T: usize> PackedFlexm
         }
         let mut r = HeaderReader(head, 8);
         head[..8] == PACKED_MAGIC
-            && r.u32() == PACKED_VERSION
+            && matches!(r.u32(), PACKED_VERSION | PACKED_VERSION_NO_FLAGS)
             && r.u32() == C as u32
             && r.u32() == F as u32
             && r.u32() == T as u32
@@ -1739,8 +1793,8 @@ mod tests {
 
     #[test]
     fn layout_holds_every_key_size() {
-        for (max_ref, max_pos) in [(1, 1), (1000, 5_000_000), ((1 << 28) - 1, (1 << 34) - 1), (3, (1 << 40) - 1)] {
-            let l = PackedLayout::new(max_ref, max_pos, 6144, 2);
+        for (max_ref, max_pos, flag_bits) in [(1, 1, 0), (1000, 5_000_000, 0), (1000, 5_000_000, FLAG_BITS), ((1 << 28) - 1, (1 << 34) - 1, 0), ((1 << 28) - 1, (1 << 34) - 1, FLAG_BITS), (3, (1 << 40) - 1, 0)] {
+            let l = PackedLayout::new(max_ref, max_pos, 6144, 2, flag_bits);
             let w = l.entry_bits() as u64;
             // The cells a key of n values takes: n, or n + ceil(n/2) with a header.
             for n in 1..4096u64 {

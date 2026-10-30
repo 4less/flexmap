@@ -529,6 +529,21 @@ pub struct FMValues<const F: usize, const HEADER_THRESHOLD: usize> {
     pub data: Vec<VCell>,
 }
 
+/// `FMValues::get_range_mut` on a slice of the values (`start..end` relative to it): a parallel
+/// build hands each thread its own slice.
+pub fn range_mut<const HEADER_THRESHOLD: usize>(data: &mut [VCell], start: usize, end: usize) -> VRangeMut<'_> {
+    let size = end - start;
+    if size > HEADER_THRESHOLD {
+        let header_size = FMValues::<0, HEADER_THRESHOLD>::get_header_size(size);
+        let values_size = size - header_size;
+        let (head, rest) = data[start..end].split_at_mut(header_size);
+        let header: &mut [HeaderSeq] = unsafe { slice::from_raw_parts_mut(head.as_mut_ptr() as *mut HeaderSeq, values_size) };
+        VRangeMut::new(Some(header), rest)
+    } else {
+        VRangeMut::new(None, &mut data[start..end])
+    }
+}
+
 impl<const F: usize, const HEADER_THRESHOLD: usize> FMValues<F, HEADER_THRESHOLD> {
     pub fn new(size: usize) -> Self {
         FMValues {
